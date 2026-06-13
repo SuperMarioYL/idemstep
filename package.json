@@ -1,0 +1,76 @@
+{
+  "name": "idemstep",
+  "version": "0.1.0",
+  "description": "Stripe's Idempotency-Key, but for your browser agent: wrap a transactional browser step with a client-generated key so a self-healing retry after a slow-but-successful submit is deduplicated instead of placing the order twice.",
+  "keywords": [
+    "idempotency",
+    "idempotency-key",
+    "browser-automation",
+    "playwright",
+    "agent",
+    "exactly-once",
+    "proxy",
+    "dedup",
+    "retry"
+  ],
+  "license": "MIT",
+  "author": "SuperMarioYL",
+  "homepage": "https://github.com/SuperMarioYL/idemstep#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/SuperMarioYL/idemstep.git"
+  },
+  "bugs": {
+    "url": "https://github.com/SuperMarioYL/idemstep/issues"
+  },
+  "type": "module",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "bin": {
+    "idemstep": "./dist/index.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "README.zh-CN.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsx src/index.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "proxy": "tsx src/index.ts proxy"
+  },
+  "peerDependencies": {
+    "playwright": "^1.48"
+  },
+  "peerDependenciesMeta": {
+    "playwright": {
+      "optional": true
+    }
+  },
+  "dependencies": {
+    "express": "^4.21.0"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/node": "^22.7.0",
+    "playwright": "^1.48.0",
+    "tsup": "^8.3.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0",
+    "vitest": "^2.1.0"
+  }
+}
