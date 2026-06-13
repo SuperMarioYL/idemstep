@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="420" viewBox="0 0 760 420" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">
+  <rect width="760" height="420" rx="12" fill="#1b1033"/>
+  <rect x="0" y="0" width="760" height="34" rx="12" fill="#2a1857"/>
+  <rect x="0" y="20" width="760" height="14" fill="#2a1857"/>
+  <circle cx="22" cy="17" r="6" fill="#ff5f57"/>
+  <circle cx="44" cy="17" r="6" fill="#febc2e"/>
+  <circle cx="66" cy="17" r="6" fill="#28c840"/>
+  <text x="380" y="22" fill="#b9a6e6" font-size="13" text-anchor="middle">npx tsx examples/place-order.ts</text>
+
+  <text x="28" y="74" fill="#7de3c3" font-size="14">IdemStep demo — placing one order, retrying it three times.</text>
+
+  <text x="28" y="110" fill="#9f8fd0" font-size="13">checkout site  : http://127.0.0.1:54121</text>
+  <text x="28" y="132" fill="#9f8fd0" font-size="13">idem proxy     : http://localhost:8473</text>
+  <text x="28" y="154" fill="#9f8fd0" font-size="13">idempotency key: order:7c3f…b21a</text>
+
+  <text x="28" y="192" fill="#e8e1ff" font-size="13">attempt #1: agent clicks #submit...</text>
+  <text x="52" y="212" fill="#7de3c3" font-size="13">-&gt; forwarded            status=200   ✓ order placed</text>
+
+  <text x="28" y="244" fill="#e8e1ff" font-size="13">attempt #2: agent re-drives submit (self-healing retry)...</text>
+  <text x="52" y="264" fill="#febc2e" font-size="13">-&gt; REPLAYED (suppressed) status=200   ✗ not forwarded</text>
+
+  <text x="28" y="296" fill="#e8e1ff" font-size="13">attempt #3: agent re-drives submit (self-healing retry)...</text>
+  <text x="52" y="316" fill="#febc2e" font-size="13">-&gt; REPLAYED (suppressed) status=200   ✗ not forwarded</text>
+
+  <line x1="28" y1="340" x2="500" y2="340" stroke="#473079" stroke-width="1"/>
+  <text x="28" y="364" fill="#c9bbf0" font-size="14">retried 3x  ·  orders actually placed: 1</text>
+  <text x="28" y="386" fill="#c9bbf0" font-size="14">proxy suppressed: 2 duplicate request(s)</text>
+
+  <rect x="520" y="180" width="216" height="150" rx="10" fill="#2a1857" stroke="#7c5cff" stroke-width="1.5"/>
+  <text x="628" y="214" fill="#7c5cff" font-size="22" font-weight="700" text-anchor="middle">retried 2x</text>
+  <text x="628" y="242" fill="#7de3c3" font-size="22" font-weight="700" text-anchor="middle">ordered 1x</text>
+  <text x="628" y="284" fill="#9f8fd0" font-size="12" text-anchor="middle">placeholder — replace with</text>
+  <text x="628" y="302" fill="#9f8fd0" font-size="12" text-anchor="middle">a real 20s screen recording</text>
+
+  <text x="380" y="412" fill="#5e4b8a" font-size="11" text-anchor="middle">PLACEHOLDER ASSET · record the real demo per docs/README.md and save as docs/demo.gif</text>
+</svg>
