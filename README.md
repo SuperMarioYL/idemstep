@@ -138,7 +138,7 @@ Two processes, no orchestration — a wrapper guards the client-side effect, a p
 
 - **`idemStep(label, key, fn)`** — first call runs `fn`, caches the result, marks the key `committed`. A later call with the same key short-circuits `fn` and replays the cached result.
 - **The proxy** — computes a `requestSig` (`method + host + path + body-hash`) for every outbound request carrying an `x-idem-key`. If a `committed` key already owns that signature, it replays the cached response instead of forwarding. The retry never reaches the upstream site.
-- **`IdemStore`** — in-memory by default; pass `--store path.json` to the CLI (or `new IdemStore({ filePath })`) so dedup state survives a process restart. Redis/Postgres are out of scope for v0.1.
+- **`IdemStore`** — in-memory by default; pass `--store path.json` to the CLI (or `new IdemStore({ filePath })`) so dedup state survives a process restart. Pass `ttlMs` (CLI `--ttl`) to expire committed keys after a window — past it, a retry is a genuinely new action, and the store stays bounded across a long-running session. Redis/Postgres are out of scope.
 
 Honest scope: IdemStep does **not** ask the third-party site to cooperate — it cannot inject a key a site you don't control will honor. It dedups *client-side* by replaying the request you already committed. That is replay-suppression in a proxy you own, not server-side idempotency.
 
@@ -162,13 +162,14 @@ IdemStep is not a harness and does not compete with one — it is the dedup half
 | --- | --- | --- |
 | `idemStep` | `idemStep(label, key, fn, opts?)` | Exactly-once wrapper around a side-effecting step. |
 | `startProxy` | `startProxy(opts?) => RunningProxy` | Start the local interception/dedup proxy. |
-| `IdemStore` | `new IdemStore({ filePath? })` | The key → `StepRecord` store (in-memory or JSON-file). |
+| `IdemStore` | `new IdemStore({ filePath?, ttlMs? })` | The key → `StepRecord` store (in-memory or JSON-file). `ttlMs` expires committed keys after a window. |
+| `store.prune()` | `() => number` | Sweep committed keys past the TTL; returns how many were removed. |
 | `generateKey` | `generateKey(prefix?)` | Mint an idempotency key (or derive your own stable one). |
 | `requestSignature` | `requestSignature(shape)` | Compute the `method+host+path+body-hash` dedup signature. |
 | `setDefaultStore` / `getDefaultStore` | — | Swap the process-wide store `idemStep` uses by default. |
 | `IDEM_KEY_HEADER` | `"x-idem-key"` | Header the proxy reads to opt a request into dedup. |
 
-CLI: `idemstep proxy [--port N] [--store path.json]`.
+CLI: `idemstep proxy [--port N] [--store path.json] [--ttl MS]`.
 
 ## Pricing
 
