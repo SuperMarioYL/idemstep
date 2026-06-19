@@ -66,6 +66,42 @@ describe("m1: idemStep wrapper", () => {
     expect([a, b, c]).toEqual(["receipt-123", "receipt-123", "receipt-123"]);
   });
 
+  it("fires the effect exactly once for CONCURRENT same-key calls", async () => {
+    let effects = 0;
+    const key = generateKey("order");
+    const slowSubmit = () =>
+      idemStep("place_order", key, async () => {
+        await new Promise((r) => setTimeout(r, 20));
+        effects += 1;
+        return `receipt-${effects}`;
+      });
+
+    // Fire three attempts BEFORE any of them commits — the exact window a
+    // self-healing harness re-drives a slow-but-successful submit in.
+    const [a, b, c] = await Promise.all([slowSubmit(), slowSubmit(), slowSubmit()]);
+
+    expect(effects).toBe(1); // the side effect must still fire exactly once
+    expect(a).toBe("receipt-1");
+    expect([a, b, c]).toEqual(["receipt-1", "receipt-1", "receipt-1"]);
+  });
+
+  it("lets a later call retry after the first attempt rejects", async () => {
+    let attempts = 0;
+    const key = generateKey("order");
+    const flaky = () =>
+      idemStep("place_order", key, async () => {
+        attempts += 1;
+        if (attempts === 1) throw new Error("network blip");
+        return "receipt-ok";
+      });
+
+    await expect(flaky()).rejects.toThrow("network blip");
+    // The key was NOT committed, so a fresh attempt is allowed to run fn again.
+    const ok = await flaky();
+    expect(attempts).toBe(2);
+    expect(ok).toBe("receipt-ok");
+  });
+
   it("isolates state when an explicit store is passed", async () => {
     const store = new IdemStore();
     let effects = 0;
@@ -146,6 +182,97 @@ describe("IdemStore", () => {
     expect(s.findCommittedBySig("sig")).toBeUndefined();
     s.commit("k", 1);
     expect(s.findCommittedBySig("sig")?.key).toBe("k");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// v0.2 — TTL expiry: a committed key past its window is a genuinely new action.
+// ---------------------------------------------------------------------------
+describe("IdemStore TTL expiry", () => {
+  it("treats a committed key as absent once it ages past ttlMs", async () => {
+    const store = new IdemStore({ ttlMs: 30 });
+    store.begin("k", "place_order");
+    store.commit("k", { order: 1 });
+
+    expect(store.isCommitted("k")).toBe(true);
+    expect(store.get("k")?.result).toEqual({ order: 1 });
+
+    await new Promise((r) => setTimeout(r, 45));
+
+    // Past the window: lookups behave as if the key never existed.
+    expect(store.isCommitted("k")).toBe(false);
+    expect(store.get("k")).toBeUndefined();
+  });
+
+  it("lets idemStep re-run the effect after a key expires", async () => {
+    const store = new IdemStore({ ttlMs: 25 });
+    let effects = 0;
+    const submit = () =>
+      idemStep("place_order", "order-1", () => {
+        effects += 1;
+        return effects;
+      }, { store });
+
+    expect(await submit()).toBe(1);
+    expect(await submit()).toBe(1); // within window: replayed
+
+    await new Promise((r) => setTimeout(r, 40));
+
+    expect(await submit()).toBe(2); // window elapsed: a new action runs
+    expect(effects).toBe(2);
+  });
+
+  it("findCommittedBySig skips expired records", async () => {
+    const store = new IdemStore({ ttlMs: 20 });
+    store.begin("k", "l");
+    store.setRequestSig("k", "sig-x");
+    store.commit("k", 1);
+    expect(store.findCommittedBySig("sig-x")?.key).toBe("k");
+
+    await new Promise((r) => setTimeout(r, 35));
+    expect(store.findCommittedBySig("sig-x")).toBeUndefined();
+  });
+
+  it("prune() sweeps expired committed records and returns the count", async () => {
+    const store = new IdemStore({ ttlMs: 20 });
+    store.begin("a", "l");
+    store.commit("a", 1);
+    store.begin("b", "l");
+    store.commit("b", 2);
+
+    expect(store.prune()).toBe(0); // nothing aged yet
+    await new Promise((r) => setTimeout(r, 35));
+    expect(store.prune()).toBe(2);
+    expect(store.all()).toHaveLength(0);
+  });
+
+  it("keeps keys forever when no ttl is configured (v0.1 behaviour)", async () => {
+    const store = new IdemStore();
+    store.begin("k", "l");
+    store.commit("k", 1);
+    await new Promise((r) => setTimeout(r, 15));
+    expect(store.isCommitted("k")).toBe(true);
+    expect(store.prune()).toBe(0);
+  });
+
+  it("does not write the inflight promise into the JSON file", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "idemstore-ttl-"));
+    const filePath = join(dir, "store.json");
+    try {
+      const store = new IdemStore({ filePath, ttlMs: 1000 });
+      await idemStep("place_order", "k", async () => {
+        await new Promise((r) => setTimeout(r, 5));
+        return { ok: true };
+      }, { store });
+
+      // A fresh instance reading the file must reload a clean committed record.
+      const reloaded = new IdemStore({ filePath, ttlMs: 1000 });
+      expect(reloaded.isCommitted("k")).toBe(true);
+      expect(reloaded.get("k")?.inflight).toBeUndefined();
+      expect(reloaded.get("k")?.result).toEqual({ ok: true });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 
@@ -239,6 +366,33 @@ describe("m2: proxy dedup", () => {
     await plain();
     expect(upstreamHits).toBe(2);
     expect(proxy.suppressedCount()).toBe(0);
+  });
+
+  it("forwards a duplicate again once the key's TTL has elapsed", async () => {
+    const ttlProxy = await startProxy({ port: 0, ttlMs: 30, log: false });
+    const key = generateKey("order");
+    const post = () =>
+      fetch(`http://localhost:${ttlProxy.port}/checkout`, {
+        method: "POST",
+        headers: {
+          "x-idem-target": `http://${upstreamHost}`,
+          "content-type": "application/json",
+          [IDEM_KEY_HEADER]: key,
+          "x-idem-label": "place_order",
+        },
+        body: JSON.stringify({ cart: ["sku-1"] }),
+      });
+
+    await post();
+    await post(); // within window: suppressed
+    expect(upstreamHits).toBe(1);
+    expect(ttlProxy.suppressedCount()).toBe(1);
+
+    await new Promise((r) => setTimeout(r, 45));
+    await post(); // window elapsed: forwarded as a new action
+    expect(upstreamHits).toBe(2);
+
+    await ttlProxy.close();
   });
 });
 

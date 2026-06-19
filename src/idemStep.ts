@@ -54,12 +54,29 @@ export async function idemStep<T>(
     return existing.result as T;
   }
 
-  // A `pending` record means a concurrent/previous attempt for this key is (or
-  // was) in flight. We still must produce a result, so we run fn and commit;
-  // commit() is idempotent on the cached result for the winning call.
-  store.begin(key, label);
+  // A `pending` record with an in-flight promise means another call for this
+  // key is *currently* running `fn`. Coalesce onto it rather than firing the
+  // side effect a second time — this is what makes concurrent same-key retries
+  // (a self-healing harness re-driving a slow submit) exactly-once.
+  const inflight = store.getInflight(key);
+  if (inflight) {
+    return inflight as Promise<T>;
+  }
 
-  const result = await fn();
-  store.commit(key, result);
-  return result;
+  // We are the winning call: claim the key, run `fn` exactly once, and publish
+  // the in-flight promise so any concurrent caller awaits our result. If `fn`
+  // rejects we clear the handle so a *later* retry may legitimately try again.
+  store.begin(key, label);
+  const run = (async () => {
+    try {
+      const result = await fn();
+      store.commit(key, result);
+      return result;
+    } catch (err) {
+      store.clearInflight(key);
+      throw err;
+    }
+  })();
+  store.setInflight(key, run);
+  return run;
 }
