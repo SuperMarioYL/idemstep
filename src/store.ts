@@ -126,12 +126,19 @@ export class IdemStore {
     return record;
   }
 
-  /** Mark a key committed and cache the wrapped fn's result. */
+  /**
+   * Mark a key committed and cache the wrapped fn's result. Committing a record
+   * that is *already* committed is a no-op that returns the existing record
+   * untouched — a committed action is final, so a stray second commit (e.g. a
+   * raced upstream response under a drifted-body retry) must never re-stamp the
+   * result or `committedAt`.
+   */
   commit(key: IdemKey, result: unknown): StepRecord {
     const record = this.records.get(key);
     if (!record) {
       throw new Error(`IdemStore.commit: no pending record for key "${key}"`);
     }
+    if (record.status === "committed") return record;
     record.status = "committed";
     record.result = result;
     record.committedAt = Date.now();
@@ -164,12 +171,21 @@ export class IdemStore {
     if (record) record.inflight = undefined;
   }
 
-  /** Attach the outbound request signature observed by the proxy. */
-  setRequestSig(key: IdemKey, requestSig: string): void {
+  /**
+   * Attach the outbound request signature observed by the proxy. Refuses to
+   * mutate an already-committed record: once a key is committed its `requestSig`
+   * binds the one logical action it stands for, and a same-key retry carrying a
+   * drifted body must NOT be allowed to overwrite it (that would corrupt the
+   * cached record and let the proxy re-forward upstream). Returns whether the
+   * signature was written.
+   */
+  setRequestSig(key: IdemKey, requestSig: string): boolean {
     const record = this.records.get(key);
-    if (!record) return;
+    if (!record) return false;
+    if (record.status === "committed") return false;
     record.requestSig = requestSig;
     this.persist();
+    return true;
   }
 
   /** Cache the HTTP response so the proxy can replay it on a duplicate. */
@@ -252,12 +268,52 @@ export class IdemStore {
     if (!this.filePath) return;
     try {
       const raw = readFileSync(this.filePath, "utf8");
-      const parsed = JSON.parse(raw) as StepRecord[];
-      for (const record of parsed) {
-        this.records.set(record.key, record);
+      const parsed: unknown = JSON.parse(raw);
+      // A valid store file is an array of records. Anything else (an object, a
+      // bare value, null) is treated as a corrupt file and ignored.
+      if (!Array.isArray(parsed)) return;
+      for (const candidate of parsed) {
+        const record = this.sanitizeLoadedRecord(candidate);
+        if (record) this.records.set(record.key, record);
       }
     } catch {
       // Corrupt or empty store file — start clean rather than crash.
     }
+  }
+
+  /**
+   * Validate one element parsed from the JSON-file store. `JSON.parse` only
+   * guarantees the file is syntactically valid JSON, not that each element is a
+   * well-formed {@link StepRecord} — a hand-edited or half-written file can hold
+   * elements missing `key`, with a bogus `status`, or persisted as `pending`.
+   * Returns a clean record, or `undefined` for anything that must be dropped:
+   *
+   *   - a non-object, or one without a non-empty string `key` (which would
+   *     otherwise be keyed under `undefined` and shadow real lookups);
+   *   - a record whose `status` is neither `pending` nor `committed`;
+   *   - a `pending` record — an in-flight action cannot meaningfully survive a
+   *     process restart, and (because TTL/prune only sweep committed records) a
+   *     persisted `pending` would otherwise live forever as an un-expirable key.
+   */
+  private sanitizeLoadedRecord(candidate: unknown): StepRecord | undefined {
+    if (typeof candidate !== "object" || candidate === null) return undefined;
+    const rec = candidate as Partial<StepRecord>;
+    if (typeof rec.key !== "string" || rec.key.length === 0) return undefined;
+    if (rec.status !== "committed" && rec.status !== "pending") return undefined;
+    // Drop un-resumable in-flight records; only committed actions are durable.
+    if (rec.status === "pending") return undefined;
+    const createdAt =
+      typeof rec.createdAt === "number" ? rec.createdAt : Date.now();
+    return {
+      key: rec.key,
+      label: typeof rec.label === "string" ? rec.label : "step",
+      status: "committed",
+      result: rec.result,
+      requestSig: typeof rec.requestSig === "string" ? rec.requestSig : undefined,
+      cachedResponse: rec.cachedResponse,
+      createdAt,
+      committedAt:
+        typeof rec.committedAt === "number" ? rec.committedAt : createdAt,
+    };
   }
 }
