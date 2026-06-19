@@ -8,7 +8,7 @@
 
 <p align="center">
   <a href="./LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT" /></a>
-  <img src="https://img.shields.io/badge/release-v0.1.0-7c5cff.svg" alt="Release v0.1.0" />
+  <img src="https://img.shields.io/badge/release-v0.3.0-7c5cff.svg" alt="Release v0.3.0" />
   <a href="./.github/workflows/ci.yml"><img src="https://img.shields.io/badge/CI-vitest-success.svg" alt="CI: vitest" /></a>
   <img src="https://img.shields.io/badge/node-%3E%3D20-339933.svg?logo=node.js&logoColor=white" alt="Node >= 20" />
   <img src="https://img.shields.io/badge/exactly--once-✓-0db7a4.svg" alt="Exactly-once" />
@@ -137,7 +137,8 @@ Two processes, no orchestration — a wrapper guards the client-side effect, a p
 ```
 
 - **`idemStep(label, key, fn)`** — first call runs `fn`, caches the result, marks the key `committed`. A later call with the same key short-circuits `fn` and replays the cached result.
-- **The proxy** — computes a `requestSig` (`method + host + path + body-hash`) for every outbound request carrying an `x-idem-key`. If a `committed` key already owns that signature, it replays the cached response instead of forwarding. The retry never reaches the upstream site.
+- **The proxy** — computes a `requestSig` (`method + host + path + body-hash`) for every outbound request carrying an `x-idem-key`. If the key is already `committed`, it replays the cached response instead of forwarding — even if the retry's body has drifted, since the key denotes one logical action. Two concurrent same-key requests coalesce onto a single forward. The retry never reaches the upstream site.
+- **HTTPS, not just plaintext** — `startProxy({ https: true })` (CLI `--https`) terminates `CONNECT host:443` tunnels with a locally-trusted MITM leaf cert and runs the same dedup over the decrypted traffic, so exactly-once works against real https checkout sites. Trust the proxy's `caCertPem` in your client. Pass-through only — it never rewrites bodies, headers, or tokens. Requires the system `openssl`.
 - **`IdemStore`** — in-memory by default; pass `--store path.json` to the CLI (or `new IdemStore({ filePath })`) so dedup state survives a process restart. Pass `ttlMs` (CLI `--ttl`) to expire committed keys after a window — past it, a retry is a genuinely new action, and the store stays bounded across a long-running session. Redis/Postgres are out of scope.
 
 Honest scope: IdemStep does **not** ask the third-party site to cooperate — it cannot inject a key a site you don't control will honor. It dedups *client-side* by replaying the request you already committed. That is replay-suppression in a proxy you own, not server-side idempotency.
@@ -161,7 +162,7 @@ IdemStep is not a harness and does not compete with one — it is the dedup half
 | Export | Signature | Purpose |
 | --- | --- | --- |
 | `idemStep` | `idemStep(label, key, fn, opts?)` | Exactly-once wrapper around a side-effecting step. |
-| `startProxy` | `startProxy(opts?) => RunningProxy` | Start the local interception/dedup proxy. |
+| `startProxy` | `startProxy(opts?) => RunningProxy` | Start the local interception/dedup proxy. Pass `{ https: true }` for CONNECT/MITM HTTPS interception; the CA to trust is on `proxy.caCertPem`. |
 | `IdemStore` | `new IdemStore({ filePath?, ttlMs? })` | The key → `StepRecord` store (in-memory or JSON-file). `ttlMs` expires committed keys after a window. |
 | `store.prune()` | `() => number` | Sweep committed keys past the TTL; returns how many were removed. |
 | `generateKey` | `generateKey(prefix?)` | Mint an idempotency key (or derive your own stable one). |
@@ -169,7 +170,7 @@ IdemStep is not a harness and does not compete with one — it is the dedup half
 | `setDefaultStore` / `getDefaultStore` | — | Swap the process-wide store `idemStep` uses by default. |
 | `IDEM_KEY_HEADER` | `"x-idem-key"` | Header the proxy reads to opt a request into dedup. |
 
-CLI: `idemstep proxy [--port N] [--store path.json] [--ttl MS]`.
+CLI: `idemstep proxy [--port N] [--store path.json] [--ttl MS] [--https]`.
 
 ## Pricing
 
@@ -188,6 +189,8 @@ The hosted dedup proxy is the v0.2 monetization seam: teams running agents on re
 - [x] **m1** — `idemStep(label, key, fn)` wrapper: same-key re-run short-circuits and replays the cached result.
 - [x] **m2** — local interception proxy: a duplicate outbound transactional request under a committed key is suppressed and the original response replayed.
 - [x] **m3** — runnable `examples/place-order.ts` proving exactly-once end-to-end ("retried 2x, ordered 1x").
+- [x] **Concurrency + durability hardening (v0.3)** — proxy-layer in-flight coalescing, committed-replay on body drift, pending release on upstream error, and validation of the JSON-file store on load.
+- [x] **HTTPS / CONNECT tunnel (v0.3)** — MITM interception so dedup works against real https sites; `examples/place-order-https.ts` proves exactly-once over TLS.
 - [ ] **Hosted dedup proxy** — the managed cross-site interception layer (durable store, audit log) as the paid tier.
 - [ ] **Auto-detection of side-effecting steps** — POST/submit heuristics so the default path needs zero annotation.
 - [ ] **Duplicate-detection / reconcile mode** — post-hoc detection alongside prevention.

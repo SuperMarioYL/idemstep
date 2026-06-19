@@ -27,6 +27,8 @@ export {
   IDEM_REPLAYED_HEADER,
 } from "./proxy.js";
 export type { ProxyOptions, RunningProxy } from "./proxy.js";
+export { CertAuthority, attachConnectTunnel } from "./connect.js";
+export type { ConnectTunnelOptions } from "./connect.js";
 export {
   generateKey,
   requestSignature,
@@ -42,17 +44,19 @@ interface ParsedArgs {
   port?: number;
   store?: string;
   ttlMs?: number;
+  https: boolean;
   help: boolean;
 }
 
 function parseArgs(argv: string[]): ParsedArgs {
-  const out: ParsedArgs = { help: false };
+  const out: ParsedArgs = { help: false, https: false };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     if (arg === "--help" || arg === "-h") out.help = true;
     else if (arg === "--port" || arg === "-p") out.port = Number(argv[++i]);
     else if (arg === "--store" || arg === "-s") out.store = argv[++i];
     else if (arg === "--ttl" || arg === "-t") out.ttlMs = Number(argv[++i]);
+    else if (arg === "--https") out.https = true;
     else if (!arg.startsWith("-") && out.command === undefined) out.command = arg;
   }
   return out;
@@ -73,6 +77,9 @@ Options:
   -s, --store PATH  JSON-file store so dedup state survives a restart
   -t, --ttl MS      Expire committed keys after MS milliseconds (default: keep
                     forever). After the window a retry is a new action.
+      --https       Intercept HTTPS via a CONNECT+MITM tunnel so dedup works
+                    against real https sites (requires openssl; prints the CA
+                    cert to trust in the client).
   -h, --help        Show this help
 `;
 
@@ -86,11 +93,25 @@ async function main(): Promise<void> {
 
   if (args.command === "proxy") {
     const store = new IdemStore({ filePath: args.store, ttlMs: args.ttlMs });
-    const proxy = await startProxy({ port: args.port ?? 8473, store });
+    const proxy = await startProxy({ port: args.port ?? 8473, store, https: args.https });
     process.stdout.write(
       `idemstep proxy ready on http://localhost:${proxy.port}\n` +
         `point Playwright at it: { proxy: { server: "http://localhost:${proxy.port}" } }\n`,
     );
+    if (args.https) {
+      if (proxy.caCertPem) {
+        process.stdout.write(
+          "HTTPS interception ON — trust this CA in your client " +
+            "(e.g. NODE_EXTRA_CA_CERTS) to accept the MITM:\n" +
+            `${proxy.caCertPem}`,
+        );
+      } else {
+        process.stderr.write(
+          "warning: --https requested but HTTPS interception is unavailable " +
+            "(is `openssl` installed?); serving plain http only\n",
+        );
+      }
+    }
     const shutdown = async () => {
       await proxy.close();
       process.exit(0);

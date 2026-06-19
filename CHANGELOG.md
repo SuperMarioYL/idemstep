@@ -4,6 +4,51 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-06-19
+
+Hardens the proxy under concurrency and flaky upstreams, validates the on-disk
+store, and reaches real (HTTPS) checkout sites through a CONNECT tunnel.
+
+### Added
+
+- **HTTPS interception via a CONNECT+MITM tunnel — `startProxy({ https: true })`
+  and `idemstep proxy --https`.** The proxy now terminates `CONNECT host:443`
+  tunnels with a locally-trusted leaf cert (signed by a process-local CA) and
+  runs the same `x-idem-key` dedup/replay over the decrypted traffic, so
+  exactly-once works against real https sites — not just plaintext fixtures.
+  The CA to trust in the client is exposed as `proxy.caCertPem` (and printed by
+  the CLI). Pass-through only: the tunnel reads the idempotency key and replays
+  cached responses; it never rewrites bodies, headers, or tokens. New
+  `examples/place-order-https.ts` proves "retried 2x, ordered 1x" over HTTPS.
+  Cert material is minted via the system `openssl`, so no runtime dependency is
+  added; if `openssl` is absent the proxy still serves plain http.
+
+### Fixed
+
+- **Two concurrent same-key requests double-forwarded at the proxy.** The
+  proxy's only guard was the committed-check, so two same-key requests racing
+  before the first committed both forwarded upstream (a double order). The proxy
+  now coalesces concurrent same-key forwards: a second request mid-flight awaits
+  and replays the first's response instead of POSTing again. (v0.2's coalescing
+  only covered the `idemStep()` wrapper, never the proxy.)
+- **A committed key with a drifted retry body re-forwarded and corrupted its
+  record.** A same-key retry carrying a different body bypassed the
+  committed-check; `setRequestSig` then overwrote the committed record and the
+  request was forwarded again. A committed key now always replays its cached
+  response regardless of body drift, and `setRequestSig`/`commit` refuse to
+  mutate an already-committed record.
+- **Pending records leaked forever on an upstream error.** TTL/prune only sweep
+  committed records, so a `pending` record left behind by a flaky upstream lived
+  forever in memory and in the JSON file. The proxy now releases the pending
+  record on the upstream-error path before returning 502.
+- **The JSON-file store trusted arbitrary parsed shapes on load.** `load()` now
+  requires an array, drops elements lacking a string `key` or a valid `status`,
+  and discards persisted `pending` records (an in-flight action cannot survive a
+  restart) — so a hand-edited or half-written file can no longer shadow real
+  lookups or seed an un-expirable key.
+
+[0.3.0]: https://github.com/SuperMarioYL/idemstep/releases/tag/v0.3.0
+
 ## [0.2.0] - 2026-06-19
 
 First feature iteration: a concurrency-correctness fix and TTL key expiry.
