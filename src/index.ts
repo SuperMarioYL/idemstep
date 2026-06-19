@@ -15,7 +15,12 @@
 export { idemStep, setDefaultStore, getDefaultStore } from "./idemStep.js";
 export type { IdemStepOptions } from "./idemStep.js";
 export { IdemStore } from "./store.js";
-export type { StepRecord, StepStatus, CachedResponse } from "./store.js";
+export type {
+  StepRecord,
+  StepStatus,
+  CachedResponse,
+  IdemStoreOptions,
+} from "./store.js";
 export {
   startProxy,
   IDEM_KEY_HEADER,
@@ -36,6 +41,7 @@ interface ParsedArgs {
   command?: string;
   port?: number;
   store?: string;
+  ttlMs?: number;
   help: boolean;
 }
 
@@ -46,6 +52,7 @@ function parseArgs(argv: string[]): ParsedArgs {
     if (arg === "--help" || arg === "-h") out.help = true;
     else if (arg === "--port" || arg === "-p") out.port = Number(argv[++i]);
     else if (arg === "--store" || arg === "-s") out.store = argv[++i];
+    else if (arg === "--ttl" || arg === "-t") out.ttlMs = Number(argv[++i]);
     else if (!arg.startsWith("-") && out.command === undefined) out.command = arg;
   }
   return out;
@@ -64,6 +71,8 @@ Commands:
 Options:
   -p, --port N      Port to listen on (default: 8473)
   -s, --store PATH  JSON-file store so dedup state survives a restart
+  -t, --ttl MS      Expire committed keys after MS milliseconds (default: keep
+                    forever). After the window a retry is a new action.
   -h, --help        Show this help
 `;
 
@@ -76,7 +85,7 @@ async function main(): Promise<void> {
   }
 
   if (args.command === "proxy") {
-    const store = args.store ? new IdemStore({ filePath: args.store }) : new IdemStore();
+    const store = new IdemStore({ filePath: args.store, ttlMs: args.ttlMs });
     const proxy = await startProxy({ port: args.port ?? 8473, store });
     process.stdout.write(
       `idemstep proxy ready on http://localhost:${proxy.port}\n` +

@@ -21,6 +21,12 @@ export interface ProxyOptions {
   port?: number;
   /** Store backing the dedup decision. Defaults to a fresh in-memory store. */
   store?: IdemStore;
+  /**
+   * TTL (ms) for committed keys, when the proxy creates its own store. After
+   * the window a duplicate is forwarded as a new action instead of suppressed.
+   * Ignored when an explicit `store` is supplied (configure the TTL there).
+   */
+  ttlMs?: number;
   /** Optional logger; defaults to console. Pass `false` to silence. */
   log?: ((line: string) => void) | false;
 }
@@ -50,7 +56,7 @@ export interface RunningProxy {
  * everything else (page loads, assets, GETs) is forwarded transparently.
  */
 export function startProxy(options: ProxyOptions = {}): Promise<RunningProxy> {
-  const store = options.store ?? new IdemStore();
+  const store = options.store ?? new IdemStore({ ttlMs: options.ttlMs });
   const log =
     options.log === false
       ? () => {}
