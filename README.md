@@ -24,6 +24,7 @@
 ## Contents
 
 - [Why this exists](#why-this-exists)
+- [Architecture](#architecture)
 - [Install &amp; Quickstart](#install--quickstart)
 - [Demo](#demo)
 - [How it works](#how-it-works)
@@ -37,7 +38,19 @@
 
 Self-healing browser harnesses re-drive any action that *looks* failed — which is exactly what makes flaky web automation usable. But a retry fired after a slow-but-successful submit has no notion of idempotency, so the booking, checkout, or account-creation happens twice. The pattern is spreading fast: [browser-use/browser-use](https://github.com/browser-use/browser-use) (98k★) is the runtime trusted with more and more write actions, and its self-healing layer grows at hundreds of stars a day. Payments solved this years ago with Stripe's `Idempotency-Key` — a stable, client-minted token that lets the receiver recognize "this is a retry, not a new request." IdemStep transplants that primitive into the browser layer: wrap a transactional step in a key, route the browser through a local proxy, and a re-driven submit becomes a no-op at the network boundary. It is the safety belt the agent-builder crowd ([affaan-m/ECC](https://github.com/affaan-m/ECC) and the broader reliability orbit) has needed since the day self-healing retries started touching real-money flows.
 
-## Install &amp; Quickstart
+## <img src="https://api.iconify.design/tabler:topology-star-3.svg?color=%230071E3&width=24" height="22" align="absmiddle" alt=""> Architecture
+
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="./assets/atlas-dark.svg">
+    <source media="(prefers-color-scheme: light)" srcset="./assets/atlas-light.svg">
+    <img src="./assets/atlas-light.svg" width="880" alt="Architecture: an Agent wraps a transactional step with idemStep(), which records the key in IdemStore; browser traffic routes through the local proxy, which checks each requestSig against committed keys and either forwards the first request to the third-party site or replays the cached response so a self-healing retry is suppressed">
+  </picture>
+</p>
+
+Two cooperating processes inside one **exactly-once boundary you own** — no third-party cooperation required. The **`idemStep()` wrapper** guards the client-side effect (a committed key replays the cached result instead of re-running `fn`), recording each key in **`IdemStore`** (in-memory or JSON-file). Browser traffic routes through the **local proxy**, which computes a `requestSig` (`method + host + path + body-hash`) and, when a committed key already owns that signature, replays the cached response instead of forwarding — so a self-healing retry never reaches the **third-party site** and the order is placed exactly once.
+
+## <img src="https://api.iconify.design/tabler:rocket.svg?color=%230071E3&width=24" height="22" align="absmiddle" alt=""> Install &amp; Quickstart
 
 From a cold clone to your first "exactly-once" proof in three steps:
 
@@ -100,13 +113,13 @@ PASS: retried 2x, ordered 1x.
 
 </details>
 
-## Demo
+## <img src="https://api.iconify.design/tabler:photo.svg?color=%230071E3&width=24" height="22" align="absmiddle" alt=""> Demo
 
 <p align="center">
-  <img src="./docs/demo.gif.svg" alt="IdemStep demo — retried 2x, ordered 1x" width="760" />
+  <img src="./assets/demo.gif" alt="IdemStep demo — retried 3x, ordered 1x" width="760" />
 </p>
 
-> 📼 The image above is a placeholder. The real 20-second screen recording (`docs/demo.gif`) still needs to be captured — record a terminal/browser split running `npx tsx examples/place-order.ts` per [docs/README.md](./docs/README.md), then drop it in at `docs/demo.gif`.
+> The clip above runs `npx tsx examples/place-order.ts` end-to-end: the agent submits, re-drives the click twice as a self-healing harness would, the IdemStep proxy suppresses both duplicates, and the checkout site records exactly one order. It is rendered in CI from [`docs/demo.tape`](./docs/demo.tape) via [`vhs`](https://github.com/charmbracelet/vhs).
 
 ## How it works
 

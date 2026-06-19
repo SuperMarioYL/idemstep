@@ -24,6 +24,7 @@
 ## 目录
 
 - [为什么需要它](#为什么需要它)
+- [架构](#架构)
 - [安装与快速上手](#安装与快速上手)
 - [演示](#演示)
 - [工作原理](#工作原理)
@@ -37,7 +38,19 @@
 
 自愈式浏览器框架会重新驱动任何「看起来失败」的动作——这正是让脆弱的网页自动化变得可用的关键。但在一次「慢但成功」的提交之后触发的重试并不理解幂等性，于是预订、结账、注册被执行了两次。这种模式正在快速扩散：[browser-use/browser-use](https://github.com/browser-use/browser-use)（98k★）这个运行时被托付了越来越多的写操作，其自愈层每天增长数百颗星。支付领域多年前就用 Stripe 的 `Idempotency-Key` 解决了这个问题——一个稳定、由客户端生成的令牌，让接收方能识别「这是一次重试，而不是一个新请求」。IdemStep 把这个原语移植到浏览器层：用一个键包裹事务步骤，让浏览器走本地代理，被重新驱动的提交就在网络边界变成空操作（no-op）。自从自愈重试开始触碰真金白银的流程那天起，Agent 构建者群体（[affaan-m/ECC](https://github.com/affaan-m/ECC) 以及更广的可靠性圈子）就一直需要这条安全带。
 
-## 安装与快速上手
+## <img src="https://api.iconify.design/tabler:topology-star-3.svg?color=%230071E3&width=24" height="22" align="absmiddle" alt=""> 架构
+
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="./assets/atlas-dark.svg">
+    <source media="(prefers-color-scheme: light)" srcset="./assets/atlas-light.svg">
+    <img src="./assets/atlas-light.svg" width="880" alt="架构：Agent 用 idemStep() 包裹事务步骤，并把键写入 IdemStore；浏览器流量经本地代理转发，代理用 requestSig 比对已 committed 的键，要么把首个请求转发给第三方站点，要么回放缓存响应，从而抑制自愈重试">
+  </picture>
+</p>
+
+两个协作的进程，被框在一个**你自己拥有的「恰好一次」边界**内——无需第三方站点配合。**`idemStep()` 包装器**守护客户端副作用（命中已 committed 的键时回放缓存结果，而不重新执行 `fn`），并把每个键写入 **`IdemStore`**（内存或 JSON 文件）。浏览器流量经**本地代理**转发，代理计算 `requestSig`（`method + host + path + body-hash`）；当某个已 committed 的键已经拥有该签名时，回放缓存响应而不转发——于是自愈重试永远到不了**第三方站点**，订单恰好下一次。
+
+## <img src="https://api.iconify.design/tabler:rocket.svg?color=%230071E3&width=24" height="22" align="absmiddle" alt=""> 安装与快速上手
 
 从全新克隆到第一次「恰好一次」证明，只需三步：
 
@@ -100,13 +113,13 @@ PASS: retried 2x, ordered 1x.
 
 </details>
 
-## 演示
+## <img src="https://api.iconify.design/tabler:photo.svg?color=%230071E3&width=24" height="22" align="absmiddle" alt=""> 演示
 
 <p align="center">
-  <img src="./docs/demo.gif.svg" alt="IdemStep 演示——重试 2 次，下单 1 次" width="760" />
+  <img src="./assets/demo.gif" alt="IdemStep 演示——重试 3 次，下单 1 次" width="760" />
 </p>
 
-> 📼 上方为占位图。真正的 20 秒屏幕录制（`docs/demo.gif`）仍待采集——按 [docs/README.md](./docs/README.md) 录制一段运行 `npx tsx examples/place-order.ts` 的终端/浏览器分屏，然后放到 `docs/demo.gif`。
+> 上方的录屏端到端运行 `npx tsx examples/place-order.ts`：Agent 提交后，像自愈框架那样再重新驱动两次点击，IdemStep 代理抑制了这两个重复请求，结账站点只记录到一笔订单。它由 CI 从 [`docs/demo.tape`](./docs/demo.tape) 经 [`vhs`](https://github.com/charmbracelet/vhs) 渲染生成。
 
 ## 工作原理
 

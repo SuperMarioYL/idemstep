@@ -1,0 +1,74 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 372" width="880" height="372"
+     font-family="Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', sans-serif"
+     role="img" aria-label="IdemStep architecture: a browser agent wraps a transactional step with idemStep(), which records the idempotency key in IdemStore; browser traffic routes through the local proxy, which compares each request signature against committed keys and either forwards the first request to the third-party site or replays the cached response so a self-healing retry is suppressed">
+  <defs>
+    <marker id="ah-d" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#5A5A66"/></marker>
+  </defs>
+  <rect x="0" y="0" width="880" height="372" fill="#1D1D1F"/>
+
+  <text x="40" y="40" font-size="16" font-weight="700" fill="#F5F5F7">IdemStep — exactly-once for browser-agent transactional steps</text>
+
+  <!-- exactly-once boundary frame around the two dedup processes -->
+  <rect x="280" y="64" width="438" height="232" rx="18" fill="none" stroke="#2DC79A" stroke-opacity="0.5" stroke-width="1.5" stroke-dasharray="6 5"/>
+  <text x="300" y="86" font-size="12.5" font-weight="600" fill="#5BE0BC">exactly-once boundary — you own this</text>
+
+  <!-- connectors -->
+  <g stroke="#3A3A44" stroke-width="1.6" fill="none">
+    <line x1="226" y1="150" x2="298" y2="150" marker-end="url(#ah-d)"/>
+    <line x1="600" y1="184" x2="600" y2="232" marker-end="url(#ah-d)"/>
+    <line x1="135" y1="206" x2="135" y2="252" marker-end="url(#ah-d)"/>
+    <line x1="376" y1="328" x2="730" y2="328" marker-end="url(#ah-d)"/>
+    <line x1="436" y1="278" x2="544" y2="262" marker-end="url(#ah-d)"/>
+  </g>
+
+  <!-- Agent + Playwright -->
+  <g>
+    <rect x="40" y="100" width="186" height="106" rx="15" fill="#8985FF" fill-opacity="0.16" stroke="#8985FF" stroke-width="1.5"/>
+    <text x="133" y="128" text-anchor="middle" font-size="15" font-weight="600" fill="#B7B4FF">Agent + Playwright</text>
+    <text x="133" y="150" text-anchor="middle" font-size="11.5" fill="#A1A1A8">self-healing harness</text>
+    <text x="133" y="170" text-anchor="middle" font-size="11.5" fill="#A1A1A8">re-drives "place order"</text>
+    <text x="133" y="190" text-anchor="middle" font-size="11.5" fill="#A1A1A8">on a slow submit</text>
+  </g>
+
+  <!-- idemStep() wrapper -->
+  <g>
+    <rect x="298" y="104" width="184" height="80" rx="15" fill="#8985FF" fill-opacity="0.18" stroke="#8985FF" stroke-width="1.6"/>
+    <text x="390" y="134" text-anchor="middle" font-size="14.5" font-weight="700" fill="#B7B4FF">idemStep(label, key, fn)</text>
+    <text x="390" y="156" text-anchor="middle" font-size="11.5" fill="#A1A1A8">committed key? replay result</text>
+    <text x="390" y="173" text-anchor="middle" font-size="11.5" fill="#A1A1A8">else run fn once, then commit</text>
+  </g>
+
+  <!-- IdemStore -->
+  <g>
+    <rect x="516" y="104" width="180" height="80" rx="15" fill="#2DC79A" fill-opacity="0.14" stroke="#2DC79A" stroke-width="1.5"/>
+    <text x="606" y="134" text-anchor="middle" font-size="14.5" font-weight="700" fill="#5BE0BC">IdemStore</text>
+    <text x="606" y="156" text-anchor="middle" font-size="11.5" fill="#A1A1A8">key -&gt; StepRecord</text>
+    <text x="606" y="173" text-anchor="middle" font-size="11.5" fill="#A1A1A8">in-memory · JSON-file</text>
+  </g>
+
+  <!-- IdemStep local proxy -->
+  <g>
+    <rect x="296" y="232" width="186" height="92" rx="15" fill="#2DC79A" fill-opacity="0.18" stroke="#2DC79A" stroke-width="1.6"/>
+    <text x="389" y="259" text-anchor="middle" font-size="14.5" font-weight="700" fill="#5BE0BC">IdemStep local proxy</text>
+    <text x="389" y="281" text-anchor="middle" font-size="11.5" fill="#A1A1A8">requestSig = method + host</text>
+    <text x="389" y="297" text-anchor="middle" font-size="11.5" fill="#A1A1A8">+ path + body-hash</text>
+    <text x="389" y="314" text-anchor="middle" font-size="11" font-weight="600" fill="#5BE0BC">committed dupe -&gt; replay, don't forward</text>
+  </g>
+
+  <!-- third-party site -->
+  <g>
+    <rect x="730" y="232" width="116" height="92" rx="15" fill="#94A3B8" fill-opacity="0.10" stroke="#94A3B8" stroke-width="1.5"/>
+    <text x="788" y="270" text-anchor="middle" font-size="13" font-weight="600" fill="#CBD5E1">third-party</text>
+    <text x="788" y="288" text-anchor="middle" font-size="13" font-weight="600" fill="#CBD5E1">site</text>
+    <text x="788" y="308" text-anchor="middle" font-size="10.5" fill="#A1A1A8">order placed once</text>
+  </g>
+
+  <!-- edge labels -->
+  <text x="262" y="142" text-anchor="middle" font-size="10.5" fill="#A1A1A8">wraps step</text>
+  <text x="616" y="214" text-anchor="middle" font-size="10.5" fill="#A1A1A8">records key</text>
+  <text x="190" y="232" text-anchor="start" font-size="10.5" fill="#A1A1A8">browser traffic via proxy</text>
+  <text x="492" y="262" text-anchor="start" font-size="10.5" fill="#A1A1A8">check committed keys</text>
+  <text x="556" y="320" text-anchor="middle" font-size="10.5" fill="#A1A1A8">forward first request only</text>
+
+  <text x="40" y="356" font-size="11" fill="#A1A1A8">A self-healing retry with the same key never reaches the site — it is replayed from the proxy. Honest scope: client-side replay-suppression, not server-side idempotency.</text>
+</svg>
