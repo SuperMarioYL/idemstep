@@ -4,6 +4,7 @@ import { URL } from "node:url";
 import express, { type Request, type Response } from "express";
 import { IdemStore, type CachedResponse } from "./store.js";
 import { requestSignature, type IdemKey } from "./key.js";
+import { CertAuthority, attachConnectTunnel } from "./connect.js";
 
 /**
  * Header the agent (via `idemStep`) attaches to a transactional request to
@@ -29,6 +30,24 @@ export interface ProxyOptions {
   ttlMs?: number;
   /** Optional logger; defaults to console. Pass `false` to silence. */
   log?: ((line: string) => void) | false;
+  /**
+   * Enable HTTPS interception via a CONNECT+MITM tunnel (see connect.ts). When
+   * on, the proxy terminates `CONNECT host:443` tunnels with a locally-trusted
+   * leaf cert and runs the same x-idem-key dedup/replay over the decrypted
+   * HTTPS traffic, so dedup works against real https checkout sites — not just
+   * plaintext fixtures. The client must trust the tunnel CA, exposed on the
+   * returned proxy as `caCertPem`. Requires the system `openssl` binary; if it
+   * is unavailable the proxy still starts and serves plain http (tunneling is
+   * skipped). Off by default.
+   */
+  https?: boolean;
+  /**
+   * TLS options for the tunnel's *upstream* leg (proxy → real https site). Use
+   * `ca` to trust a private upstream CA, or `rejectUnauthorized: false` to
+   * accept self-signed upstreams in tests/dev. Production https sites with
+   * public certs need none of this. Only consulted when `https: true`.
+   */
+  upstreamTls?: { ca?: string | string[] | Buffer | Buffer[]; rejectUnauthorized?: boolean };
 }
 
 export interface RunningProxy {
@@ -36,6 +55,12 @@ export interface RunningProxy {
   store: IdemStore;
   /** Count of transactional requests suppressed (replayed) so far. */
   suppressedCount: () => number;
+  /**
+   * PEM of the CA the HTTPS tunnel signs leaf certs with, when `https: true`.
+   * Trust this in the client (e.g. `NODE_EXTRA_CA_CERTS`) to accept the MITM.
+   * `undefined` when HTTPS interception is off or `openssl` was unavailable.
+   */
+  caCertPem?: string;
   close: () => Promise<void>;
 }
 
@@ -63,6 +88,13 @@ export function startProxy(options: ProxyOptions = {}): Promise<RunningProxy> {
       : options.log ?? ((line: string) => console.log(`[idemstep] ${line}`));
 
   let suppressed = 0;
+  // In-flight forwards keyed by idemKey. While the first request for a key is
+  // still waiting on its upstream response (not yet committed), a second same-key
+  // request awaits this promise and replays the same cached response instead of
+  // forwarding a second time — the network-side analogue of idemStep()'s
+  // in-flight coalescing. Without this, two concurrent same-key submits both see
+  // the key as not-yet-committed and both POST upstream (a double order).
+  const inflightForwards = new Map<IdemKey, Promise<CachedResponse>>();
   const app = express();
 
   // Capture the raw body for every method so we can hash it into requestSig.
@@ -98,17 +130,15 @@ export function startProxy(options: ProxyOptions = {}): Promise<RunningProxy> {
       body: rawBody.length ? rawBody : null,
     });
 
-    // Duplicate of an already-committed transactional request? The dedup unit
-    // is "this idempotency key, already committed, whose original requestSig
-    // matches what we're seeing again" — a *different* key denotes a genuinely
-    // new logical action even if the body is byte-identical, so we never
-    // cross-suppress between keys.
+    // Duplicate of an already-committed transactional request? The dedup unit is
+    // the idempotency *key*: once a key is committed it denotes one logical
+    // action, so a later request carrying that same key is a duplicate even if
+    // its body has drifted (a self-healing retry may re-render the page and
+    // re-serialize the form). We replay the cached response and — critically —
+    // never re-forward or re-bind the signature, which would double-submit and
+    // corrupt the committed record. A *different* key is always a new action.
     const existing = store.get(idemKey);
-    if (
-      existing?.status === "committed" &&
-      existing.requestSig === sig &&
-      existing.cachedResponse
-    ) {
+    if (existing?.status === "committed" && existing.cachedResponse) {
       suppressed += 1;
       log(
         `suppressed duplicate "${existing.label}" key=${idemKey} sig=${sig.slice(0, 12)} (total ${suppressed})`,
@@ -117,16 +147,76 @@ export function startProxy(options: ProxyOptions = {}): Promise<RunningProxy> {
       return;
     }
 
+    // A forward for this key is already in flight (committed not yet stamped).
+    // Coalesce onto it: await the first request's cached response and replay it
+    // rather than firing a second upstream POST for the same logical action.
+    const pending = inflightForwards.get(idemKey);
+    if (pending) {
+      suppressed += 1;
+      log(
+        `coalescing concurrent duplicate key=${idemKey} sig=${sig.slice(0, 12)} (total ${suppressed})`,
+      );
+      pending.then(
+        (cached) => replay(res, cached),
+        (err) => {
+          if (!res.headersSent) {
+            res.status(502).send(
+              `idemstep proxy upstream error: ${err instanceof Error ? err.message : String(err)}`,
+            );
+          }
+        },
+      );
+      return;
+    }
+
     // First time we see this transactional request: record it, forward it,
     // cache the response, and commit the key bound to its signature.
     store.begin(idemKey, labelFor(req) ?? "step");
     store.setRequestSig(idemKey, sig);
     log(`forwarding "${idemKey}" sig=${sig.slice(0, 12)} -> ${target}`);
-    forward(target, req, rawBody, res, { idemKey, sig }, store, log);
+    const settled = forward(target, req, rawBody, res, { idemKey, sig }, store, log);
+    inflightForwards.set(idemKey, settled);
+    // Swallow the rejection here so it never surfaces as an unhandled rejection:
+    // the upstream-error path already wrote the 502 to `res` and released the
+    // pending record. Coalesced waiters observe the rejection via their own
+    // `.then(_, onError)` handler registered above.
+    settled
+      .catch(() => {})
+      .finally(() => {
+        // Only clear if this exact promise is still the registered one.
+        if (inflightForwards.get(idemKey) === settled) inflightForwards.delete(idemKey);
+      });
   });
 
   return new Promise((resolve) => {
     const server = http.createServer(app);
+
+    // HTTPS interception: terminate CONNECT tunnels with a locally-trusted MITM
+    // cert and run the same dedup over the decrypted traffic. Best-effort — if
+    // `openssl` is unavailable the proxy still serves plain http.
+    let ca: CertAuthority | undefined;
+    let detachTunnel: (() => void) | undefined;
+    if (options.https) {
+      try {
+        ca = new CertAuthority();
+        detachTunnel = attachConnectTunnel(server, {
+          store,
+          ca,
+          upstreamTls: options.upstreamTls,
+          log: options.log === false ? () => {} : log,
+          onSuppressed: () => {
+            suppressed += 1;
+          },
+        });
+      } catch (err) {
+        log(
+          `HTTPS interception unavailable (${err instanceof Error ? err.message : String(err)}); serving plain http only`,
+        );
+        ca = undefined;
+        detachTunnel = undefined;
+      }
+    }
+
     server.listen(options.port ?? 0, () => {
       const address = server.address();
       const port =
@@ -136,9 +226,15 @@ export function startProxy(options: ProxyOptions = {}): Promise<RunningProxy> {
         port,
         store,
         suppressedCount: () => suppressed,
+        caCertPem: ca?.caCertPem,
         close: () =>
           new Promise<void>((res, rej) =>
-            server.close((err) => (err ? rej(err) : res())),
+            server.close((err) => {
+              detachTunnel?.();
+              ca?.dispose();
+              if (err) rej(err);
+              else res();
+            }),
           ),
       });
     });
@@ -186,6 +282,18 @@ function headerValue(v: string | string[] | undefined): string | undefined {
   return v;
 }
 
+/**
+ * Forward one request upstream, stream the response back to `res`, and (when a
+ * `commit` context is given) cache + commit the response under the idem key.
+ *
+ * Returns a promise that resolves with the {@link CachedResponse} once the
+ * upstream response is fully buffered, or rejects if the upstream errors. The
+ * caller registers this promise so concurrent same-key requests can coalesce
+ * onto it. On an upstream error for a committing request the just-begun pending
+ * record is *deleted* before the promise rejects: TTL/prune only sweep
+ * committed records, so a pending record left behind by a flaky upstream would
+ * otherwise poison the store forever (m6).
+ */
 function forward(
   target: string,
   req: Request,
@@ -194,57 +302,66 @@ function forward(
   commit: CommitContext | null,
   store: IdemStore,
   log: (line: string) => void,
-): void {
-  const url = new URL(target);
-  const client = url.protocol === "https:" ? https : http;
+): Promise<CachedResponse> {
+  return new Promise<CachedResponse>((resolve, reject) => {
+    const url = new URL(target);
+    const client = url.protocol === "https:" ? https : http;
 
-  // Strip hop-by-hop / idem control headers before forwarding upstream.
-  const outHeaders = { ...req.headers } as Record<string, string | string[] | undefined>;
-  delete outHeaders[IDEM_KEY_HEADER];
-  delete outHeaders["x-idem-label"];
-  delete outHeaders["x-idem-target"];
-  delete outHeaders["proxy-connection"];
-  outHeaders.host = url.host;
+    // Strip hop-by-hop / idem control headers before forwarding upstream.
+    const outHeaders = { ...req.headers } as Record<string, string | string[] | undefined>;
+    delete outHeaders[IDEM_KEY_HEADER];
+    delete outHeaders["x-idem-label"];
+    delete outHeaders["x-idem-target"];
+    delete outHeaders["proxy-connection"];
+    outHeaders.host = url.host;
 
-  const upstream = client.request(
-    url,
-    { method: req.method, headers: outHeaders },
-    (upRes) => {
-      const chunks: Buffer[] = [];
-      upRes.on("data", (c: Buffer) => chunks.push(c));
-      upRes.on("end", () => {
-        const respBody = Buffer.concat(chunks);
+    const upstream = client.request(
+      url,
+      { method: req.method, headers: outHeaders },
+      (upRes) => {
+        const chunks: Buffer[] = [];
+        upRes.on("data", (c: Buffer) => chunks.push(c));
+        upRes.on("end", () => {
+          const respBody = Buffer.concat(chunks);
 
-        if (commit) {
           const cached: CachedResponse = {
             status: upRes.statusCode ?? 200,
             headers: flattenHeaders(upRes.headers),
             bodyBase64: respBody.toString("base64"),
           };
-          store.setCachedResponse(commit.idemKey, cached);
-          store.commit(commit.idemKey, {
-            requestSig: commit.sig,
-            status: cached.status,
-          });
-          log(`committed "${commit.idemKey}" status=${cached.status}`);
-        }
 
-        res.status(upRes.statusCode ?? 200);
-        for (const [k, v] of Object.entries(upRes.headers)) {
-          if (v !== undefined) res.setHeader(k, v);
-        }
-        res.end(respBody);
-      });
-    },
-  );
+          if (commit) {
+            store.setCachedResponse(commit.idemKey, cached);
+            store.commit(commit.idemKey, {
+              requestSig: commit.sig,
+              status: cached.status,
+            });
+            log(`committed "${commit.idemKey}" status=${cached.status}`);
+          }
 
-  upstream.on("error", (err) => {
-    log(`upstream error for ${target}: ${err.message}`);
-    if (!res.headersSent) res.status(502).send(`idemstep proxy upstream error: ${err.message}`);
+          res.status(upRes.statusCode ?? 200);
+          for (const [k, v] of Object.entries(upRes.headers)) {
+            if (v !== undefined) res.setHeader(k, v);
+          }
+          res.end(respBody);
+          resolve(cached);
+        });
+        upRes.on("error", (err) => reject(err));
+      },
+    );
+
+    upstream.on("error", (err) => {
+      log(`upstream error for ${target}: ${err.message}`);
+      // Release the just-begun pending record so a flaky upstream cannot leak
+      // an un-expirable poison-pending key into the store / JSON file (m6).
+      if (commit) store.delete(commit.idemKey);
+      if (!res.headersSent) res.status(502).send(`idemstep proxy upstream error: ${err.message}`);
+      reject(err);
+    });
+
+    if (body.length) upstream.write(body);
+    upstream.end();
   });
-
-  if (body.length) upstream.write(body);
-  upstream.end();
 }
 
 function replay(res: Response, cached: CachedResponse): void {
