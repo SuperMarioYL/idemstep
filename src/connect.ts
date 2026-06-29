@@ -233,9 +233,16 @@ function tunnelHandler(
       log(`tunnel forwarding key=${idemKey} sig=${sig.slice(0, 12)} -> ${target}`);
       const settled = forwardHttps(host, port, req, rawBody, res, { idemKey, sig }, store, log, upstreamTls);
       state.inflight.set(idemKey, settled);
-      settled.finally(() => {
-        if (state!.inflight.get(idemKey) === settled) state!.inflight.delete(idemKey);
-      });
+      // Swallow the rejection: the upstream-error / response-stream-error path
+      // already wrote the 502 to `res` and released the pending record. Without
+      // this the rejection surfaces as an unhandled rejection (mirrors the
+      // plaintext proxy's `settled.catch(() => {})`). Coalesced waiters observe
+      // it via their own `.then(_, onError)` handler registered above.
+      settled
+        .catch(() => {})
+        .finally(() => {
+          if (state!.inflight.get(idemKey) === settled) state!.inflight.delete(idemKey);
+        });
     });
     req.on("error", () => {
       if (!res.headersSent) res.writeHead(400).end();
@@ -270,6 +277,21 @@ function forwardHttps(
     delete outHeaders["proxy-connection"];
     outHeaders.host = url.host;
 
+    // One settled flag guards the whole forward so the request-level and
+    // response-level error paths never double-write `res`, double-release the
+    // record, or settle the promise twice (mirrors the plaintext proxy).
+    let settled = false;
+    const fail = (err: Error, where: "request" | "response"): void => {
+      if (settled) return;
+      settled = true;
+      log(`tunnel upstream ${where} error for ${host}:${port}: ${err.message}`);
+      // Release the pending record so a flaky upstream cannot leak an
+      // un-expirable poison-pending key (mirrors the plaintext proxy).
+      if (commit) store.delete(commit.idemKey);
+      if (!res.headersSent) res.writeHead(502).end(`idemstep tunnel upstream error: ${err.message}`);
+      reject(err);
+    };
+
     const upstream = https.request(
       url,
       {
@@ -282,6 +304,8 @@ function forwardHttps(
         const chunks: Buffer[] = [];
         upRes.on("data", (c: Buffer) => chunks.push(c));
         upRes.on("end", () => {
+          if (settled) return;
+          settled = true;
           const respBody = Buffer.concat(chunks);
           const cached: CachedResponse = {
             status: upRes.statusCode ?? 200,
@@ -290,25 +314,27 @@ function forwardHttps(
           };
           if (commit) {
             store.setCachedResponse(commit.idemKey, cached);
-            store.commit(commit.idemKey, { requestSig: commit.sig, status: cached.status });
+            // Commit WITHOUT a result (network-commit, not the user-facing
+            // return value) — the wrapper's setResult publishes fn's real result
+            // on this shared store. Mirrors the plaintext proxy's forward().
+            store.commit(commit.idemKey);
             log(`tunnel committed key=${commit.idemKey} status=${cached.status}`);
           }
           res.writeHead(upRes.statusCode ?? 200, flattenHeaders(upRes.headers));
           res.end(respBody);
           resolve(cached);
         });
-        upRes.on("error", reject);
+        // A truncated / prematurely-closed upstream response never emits "end";
+        // without these the promise never settles and `res` never ends, so the
+        // client hangs until its own timeout. Treat the response stream's
+        // "error"/"aborted" like the request-level error (v0.4.0 response-leg
+        // hardening, parity with the plaintext proxy's forward()).
+        upRes.on("error", (err) => fail(err, "response"));
+        upRes.on("aborted", () => fail(new Error("upstream response aborted"), "response"));
       },
     );
 
-    upstream.on("error", (err) => {
-      log(`tunnel upstream error for ${host}:${port}: ${err.message}`);
-      // Release the pending record so a flaky upstream cannot leak an
-      // un-expirable poison-pending key (mirrors the plaintext proxy).
-      if (commit) store.delete(commit.idemKey);
-      if (!res.headersSent) res.writeHead(502).end(`idemstep tunnel upstream error: ${err.message}`);
-      reject(err);
-    });
+    upstream.on("error", (err) => fail(err, "request"));
 
     if (body.length) upstream.write(body);
     upstream.end();

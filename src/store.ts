@@ -127,26 +127,49 @@ export class IdemStore {
   }
 
   /**
-   * Mark a key committed and cache the wrapped fn's result. Committing a record
-   * that is *already* committed is a no-op that returns the existing record
-   * untouched — a committed action is final, so a stray second commit (e.g. a
-   * raced upstream response under a drifted-body retry) must never re-stamp the
-   * result or `committedAt`.
+   * Mark a key committed and (when `result` is given) cache the wrapped fn's
+   * result. Committing a record that is *already* committed is a no-op that
+   * returns the existing record untouched — a committed action is final, so a
+   * stray second commit (e.g. a raced upstream response under a drifted-body
+   * retry, or the wrapper's commit landing after the proxy's network-commit on
+   * a shared store) must never re-stamp the result or `committedAt`.
+   *
+   * `result` is optional so the proxy can commit a key WITHOUT setting a result
+   * (its network-commit is bookkeeping, not the user-facing return value); the
+   * wrapper then publishes `fn`'s real return value via {@link setResult}.
    */
-  commit(key: IdemKey, result: unknown): StepRecord {
+  commit(key: IdemKey, result?: unknown): StepRecord {
     const record = this.records.get(key);
     if (!record) {
       throw new Error(`IdemStore.commit: no pending record for key "${key}"`);
     }
     if (record.status === "committed") return record;
     record.status = "committed";
-    record.result = result;
+    if (result !== undefined) record.result = result;
     record.committedAt = Date.now();
     // The action has settled — drop the in-flight handle so the record can be
     // garbage-collected cleanly and never lingers as a stale promise.
     record.inflight = undefined;
     this.persist();
     return record;
+  }
+
+  /**
+   * Update the cached `result` on an ALREADY-COMMITTED record. The wrapper
+   * calls this after `fn` resolves so that, on the shared-store path (wrapper +
+   * proxy sharing one JSON-file store), the proxy's network-commit — which
+   * commits WITHOUT a result — does not leave `result` undefined: a same-key
+   * retry replays `fn`'s real return value instead of the proxy's internal
+   * bookkeeping. A no-op when the record is missing or still `pending` (the
+   * pending case is {@link commit}'s job). This deliberately bypasses the
+   * committed-no-op in {@link commit}: it is the one legitimate post-commit
+   * publish.
+   */
+  setResult(key: IdemKey, result: unknown): void {
+    const record = this.records.get(key);
+    if (!record || record.status !== "committed") return;
+    record.result = result;
+    this.persist();
   }
 
   /**

@@ -20,6 +20,13 @@ export const IDEM_REPLAYED_HEADER = "x-idem-replayed";
 export interface ProxyOptions {
   /** Port to listen on. 0 picks a free port (returned by `start`). */
   port?: number;
+  /**
+   * Hostname/interface to bind. Omit to listen on all interfaces (the default
+   * `idemstep proxy` behaviour). The `idemstep hosted` command binds `0.0.0.0`
+   * by default so a remote Playwright context can route through it; pass
+   * `127.0.0.1` for local-only.
+   */
+  host?: string;
   /** Store backing the dedup decision. Defaults to a fresh in-memory store. */
   store?: IdemStore;
   /**
@@ -217,7 +224,7 @@ export function startProxy(options: ProxyOptions = {}): Promise<RunningProxy> {
       }
     }
 
-    server.listen(options.port ?? 0, () => {
+    server.listen({ port: options.port ?? 0, host: options.host }, () => {
       const address = server.address();
       const port =
         typeof address === "object" && address ? address.port : (options.port ?? 0);
@@ -289,10 +296,13 @@ function headerValue(v: string | string[] | undefined): string | undefined {
  * Returns a promise that resolves with the {@link CachedResponse} once the
  * upstream response is fully buffered, or rejects if the upstream errors. The
  * caller registers this promise so concurrent same-key requests can coalesce
- * onto it. On an upstream error for a committing request the just-begun pending
- * record is *deleted* before the promise rejects: TTL/prune only sweep
- * committed records, so a pending record left behind by a flaky upstream would
- * otherwise poison the store forever (m6).
+ * onto it. On an upstream error — whether on the *request* leg (connection
+ * refused, DNS, TLS) or the *response* leg (a truncated / prematurely-closed
+ * upstream response that never emits "end") — the just-begun pending record is
+ * *deleted* before the promise rejects: TTL/prune only sweep committed records,
+ * so a pending record left behind by a flaky upstream would otherwise poison
+ * the store forever (m6). v0.3.0 hardened only the request leg; v0.4.0 closes
+ * the response leg so a truncated response no longer hangs the client.
  */
 function forward(
   target: string,
@@ -315,6 +325,22 @@ function forward(
     delete outHeaders["proxy-connection"];
     outHeaders.host = url.host;
 
+    // One settled flag guards the whole forward so the request-level and
+    // response-level error paths never double-write `res`, double-release the
+    // record, or settle the promise twice. ("aborted" fires first on a truncated
+    // response, then "error" with ECONNRESET — the second is a no-op here.)
+    let settled = false;
+    const fail = (err: Error, where: "request" | "response"): void => {
+      if (settled) return;
+      settled = true;
+      log(`upstream ${where} error for ${target}: ${err.message}`);
+      // Release the just-begun pending record so a flaky upstream cannot leak
+      // an un-expirable poison-pending key into the store / JSON file (m6).
+      if (commit) store.delete(commit.idemKey);
+      if (!res.headersSent) res.status(502).send(`idemstep proxy upstream error: ${err.message}`);
+      reject(err);
+    };
+
     const upstream = client.request(
       url,
       { method: req.method, headers: outHeaders },
@@ -322,6 +348,8 @@ function forward(
         const chunks: Buffer[] = [];
         upRes.on("data", (c: Buffer) => chunks.push(c));
         upRes.on("end", () => {
+          if (settled) return;
+          settled = true;
           const respBody = Buffer.concat(chunks);
 
           const cached: CachedResponse = {
@@ -332,10 +360,12 @@ function forward(
 
           if (commit) {
             store.setCachedResponse(commit.idemKey, cached);
-            store.commit(commit.idemKey, {
-              requestSig: commit.sig,
-              status: cached.status,
-            });
+            // Commit WITHOUT a result: this is a network-commit, not the
+            // user-facing return value. The wrapper publishes fn's real result
+            // via store.setResult() after fn resolves; stuffing {requestSig,
+            // status} here would clobber it on a shared store (requestSig is
+            // already a field via setRequestSig, status lives in cached.status).
+            store.commit(commit.idemKey);
             log(`committed "${commit.idemKey}" status=${cached.status}`);
           }
 
@@ -346,18 +376,17 @@ function forward(
           res.end(respBody);
           resolve(cached);
         });
-        upRes.on("error", (err) => reject(err));
+        // A truncated / prematurely-closed upstream response never emits "end":
+        // without these handlers the promise would never settle and `res` would
+        // never end, so the client hangs until its own timeout. Treat the
+        // response stream's "error" and "aborted" exactly like the request-level
+        // error — 502, release the pending record, reject.
+        upRes.on("error", (err) => fail(err, "response"));
+        upRes.on("aborted", () => fail(new Error("upstream response aborted"), "response"));
       },
     );
 
-    upstream.on("error", (err) => {
-      log(`upstream error for ${target}: ${err.message}`);
-      // Release the just-begun pending record so a flaky upstream cannot leak
-      // an un-expirable poison-pending key into the store / JSON file (m6).
-      if (commit) store.delete(commit.idemKey);
-      if (!res.headersSent) res.status(502).send(`idemstep proxy upstream error: ${err.message}`);
-      reject(err);
-    });
+    upstream.on("error", (err) => fail(err, "request"));
 
     if (body.length) upstream.write(body);
     upstream.end();

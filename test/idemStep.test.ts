@@ -102,6 +102,70 @@ describe("m1: idemStep wrapper", () => {
     expect(ok).toBe("receipt-ok");
   });
 
+  it("releases the pending record when fn rejects (no poison-pending leak)", async () => {
+    const store = new IdemStore();
+    const key = generateKey("order");
+    await expect(
+      idemStep(
+        "place_order",
+        key,
+        async () => {
+          throw new Error("network blip");
+        },
+        { store },
+      ),
+    ).rejects.toThrow("network blip");
+
+    // The catch path deletes the record: TTL/prune only sweep committed
+    // records, so a leaked `pending` would otherwise live for the whole
+    // session. (The v0.3.0 proxy-side release, applied to the wrapper's own
+    // rejection path.)
+    expect(store.get(key)).toBeUndefined();
+    expect(store.all()).toHaveLength(0);
+
+    // A later retry begins a fresh record and runs fn again.
+    let attempts = 0;
+    const ok = await idemStep(
+      "place_order",
+      key,
+      async () => {
+        attempts += 1;
+        return "receipt-ok";
+      },
+      { store },
+    );
+    expect(attempts).toBe(1);
+    expect(ok).toBe("receipt-ok");
+    expect(store.isCommitted(key)).toBe(true);
+  });
+
+  it("does not persist a pending record to the JSON file when fn rejects", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "idem-reject-"));
+    const filePath = join(dir, "store.json");
+    try {
+      const store = new IdemStore({ filePath });
+      const key = generateKey("order");
+      await expect(
+        idemStep(
+          "place_order",
+          key,
+          async () => {
+            throw new Error("boom");
+          },
+          { store },
+        ),
+      ).rejects.toThrow("boom");
+
+      // The delete on the reject path persists too — a fresh instance reads an
+      // empty file, not a poison-pending key.
+      const reloaded = new IdemStore({ filePath });
+      expect(reloaded.all()).toHaveLength(0);
+      expect(reloaded.get(key)).toBeUndefined();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("isolates state when an explicit store is passed", async () => {
     const store = new IdemStore();
     let effects = 0;

@@ -65,15 +65,27 @@ export async function idemStep<T>(
 
   // We are the winning call: claim the key, run `fn` exactly once, and publish
   // the in-flight promise so any concurrent caller awaits our result. If `fn`
-  // rejects we clear the handle so a *later* retry may legitimately try again.
+  // rejects we delete the whole record so an abandoned failed key does not leak
+  // a `pending` entry — TTL/prune only sweep committed records, so a leaked
+  // pending would otherwise live for the whole session (and on disk, since
+  // begin() persisted it). A later retry begins a fresh record via begin().
   store.begin(key, label);
   const run = (async () => {
     try {
       const result = await fn();
+      // Commit (separate-store / pending-record path) AND publish the result
+      // onto an already-committed record (shared-store path, where the proxy's
+      // network-commit lands first and commits WITHOUT a result). Without the
+      // setResult, a same-key retry on a shared store would replay `undefined`
+      // instead of fn's real return value.
       store.commit(key, result);
+      store.setResult(key, result);
       return result;
     } catch (err) {
-      store.clearInflight(key);
+      // Release the pending record before rethrowing — mirrors the proxy's
+      // upstream-error release (proxy.ts). clearInflight alone left the record
+      // behind as an un-expirable poison-pending key.
+      store.delete(key);
       throw err;
     }
   })();
