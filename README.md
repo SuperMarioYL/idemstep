@@ -8,7 +8,7 @@
 
 <p align="center">
   <a href="./LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT" /></a>
-  <img src="https://img.shields.io/badge/release-v0.3.0-7c5cff.svg" alt="Release v0.3.0" />
+  <img src="https://img.shields.io/badge/release-v0.4.0-7c5cff.svg" alt="Release v0.4.0" />
   <a href="./.github/workflows/ci.yml"><img src="https://img.shields.io/badge/CI-vitest-success.svg" alt="CI: vitest" /></a>
   <img src="https://img.shields.io/badge/node-%3E%3D20-339933.svg?logo=node.js&logoColor=white" alt="Node >= 20" />
   <img src="https://img.shields.io/badge/exactly--once-✓-0db7a4.svg" alt="Exactly-once" />
@@ -170,7 +170,7 @@ IdemStep is not a harness and does not compete with one — it is the dedup half
 | `setDefaultStore` / `getDefaultStore` | — | Swap the process-wide store `idemStep` uses by default. |
 | `IDEM_KEY_HEADER` | `"x-idem-key"` | Header the proxy reads to opt a request into dedup. |
 
-CLI: `idemstep proxy [--port N] [--store path.json] [--ttl MS] [--https]`.
+CLI: `idemstep proxy [--port N] [--host H] [--store path.json] [--ttl MS] [--https]` for the local proxy, or `idemstep hosted` for the single-tenant hosted dedup proxy preview (same flags; binds `0.0.0.0`, durable `--store`, dedup logged server-side).
 
 ## Pricing
 
@@ -179,10 +179,11 @@ The OSS core — the local proxy and the `idemStep` wrapper — is free and self
 | Plan | Price | What you get |
 | --- | --- | --- |
 | **Open Source** | Free | Local in-process proxy + `idemStep` wrapper, in-memory / JSON-file store, all milestones in this repo. |
+| **Hosted Proxy (self-hosted preview — v0.4.0)** | Free | `idemstep hosted` runs the same interception layer bound to a configurable host/port with a durable JSON-file store, so a remote Playwright context gets managed exactly-once without you operating the proxy. Single-tenant only — no auth/billing. |
 | **Hosted Proxy — Starter** | **$49 / mo** | One managed dedup endpoint, 10k deduped transactional steps/mo, durable key store. Point `proxy.server` at the hosted URL — zero code change. |
 | **Hosted Proxy — Team** | **$199 / mo** | Multiple endpoints, 100k steps/mo, shared key store, retention/audit log of suppressed duplicates. Overage ~$1 / additional 1k steps. |
 
-The hosted dedup proxy is the v0.2 monetization seam: teams running agents on real-money checkout/booking flows pay for managed exactly-once instead of operating the cross-site interception layer themselves. The conversion moment is a one-line swap — point your existing Playwright `proxy.server` at the hosted endpoint, paste an API key, and watch the suppressed-duplicate count climb in the dashboard.
+The hosted dedup proxy is the v0.2 monetization seam: teams running agents on real-money checkout/booking flows pay for managed exactly-once instead of operating the cross-site interception layer themselves. v0.4.0 ships the first concrete step — `idemstep hosted`, a self-hostable single-tenant preview of that interception layer (free, MIT). The managed multi-tenant tiers above (Starter/Team, with auth, billing, and a dashboard) remain future v0.5.0+. The conversion moment is a one-line swap — point your existing Playwright `proxy.server` at the hosted endpoint and watch the suppressed-duplicate count climb.
 
 ## Roadmap
 
@@ -191,7 +192,9 @@ The hosted dedup proxy is the v0.2 monetization seam: teams running agents on re
 - [x] **m3** — runnable `examples/place-order.ts` proving exactly-once end-to-end ("retried 2x, ordered 1x").
 - [x] **Concurrency + durability hardening (v0.3)** — proxy-layer in-flight coalescing, committed-replay on body drift, pending release on upstream error, and validation of the JSON-file store on load.
 - [x] **HTTPS / CONNECT tunnel (v0.3)** — MITM interception so dedup works against real https sites; `examples/place-order-https.ts` proves exactly-once over TLS.
-- [ ] **Hosted dedup proxy** — the managed cross-site interception layer (durable store, audit log) as the paid tier.
+- [x] **Reliability fixes (v0.4)** — four exactly-once fixes: the wrapper leaking a `pending` record on reject, the CLI firing `main()` on an `index.js`/`index.ts` import, a truncated upstream response hanging the client, and the proxy's commit clobbering the shared-store wrapper's result.
+- [x] **Hosted dedup proxy preview (v0.4)** — `idemstep hosted`: the cross-site interception layer bound to a configurable host/port with a durable JSON-file store, single-tenant, dedup logged server-side.
+- [ ] **Managed multi-tenant hosted tier** — auth, team plans, billing, dashboard (the paid tier beyond the v0.4 self-hosted preview).
 - [ ] **Auto-detection of side-effecting steps** — POST/submit heuristics so the default path needs zero annotation.
 - [ ] **Duplicate-detection / reconcile mode** — post-hoc detection alongside prevention.
 - [ ] **More bindings** — Puppeteer, Selenium, native browser-use adapter.

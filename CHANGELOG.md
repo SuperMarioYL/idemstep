@@ -4,6 +4,56 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-06-29
+
+Reliability and monetization-preview release. Folds four verified correctness
+fixes found in the shipped v0.3.0 source, and surfaces the previously-deferred
+hosted dedup proxy as a scoped single-tenant preview.
+
+### Added
+
+- **Hosted dedup proxy — `idemstep hosted` (single-tenant preview).** The
+  existing interception layer (`src/proxy.ts` + `src/connect.ts`) bound to a
+  configurable host/port with a durable JSON-file store, so a remote Playwright
+  context gets managed exactly-once without operating the proxy itself. Dedup
+  events are logged server-side. Single-tenant only: no multi-tenant auth, team
+  plans, or billing (future v0.5.0+). `startProxy` gains a `host` option; the
+  CLI gains `--host` (which now also applies to `idemstep proxy`).
+
+### Fixed
+
+- **A rejected `idemStep` fn leaked a `pending` record.** The catch block only
+  cleared the in-flight handle; it never deleted the record. `isExpired()`
+  returns false for non-committed records, so TTL/prune never swept it, and
+  `begin()` had persisted it to the JSON file — an abandoned failed key lived
+  for the whole session (and on disk until restart). The catch path now deletes
+  the record before rethrowing, mirroring the proxy's upstream-error release; a
+  later retry still begins a fresh record.
+- **The CLI fired `main()` on a plain import when the consumer's entry was named
+  `index.js`/`index.ts`.** `invokedDirectly` fell back to `endsWith("index.js")`
+  / `endsWith("index.ts")`, so importing idemstep from such an entry printed the
+  USAGE banner into the consumer's stdout. Those fallbacks are dropped; the
+  primary direct-run check and the `endsWith("idemstep")` bin-symlink fallback
+  remain, so import is side-effect-free while `idemstep proxy` still runs.
+- **A truncated / prematurely-closed upstream response hung the client.** The
+  response stream only did `upRes.on("error", reject)` (never ending `res`) and
+  had no `aborted` handler; on a premature upstream close `"end"` never fired,
+  the promise never settled, and `res` never ended. The proxy now treats the
+  response stream's `"error"`/`"aborted"` like the request-level error — 502,
+  release the pending record, reject — in both `forward` (proxy.ts) and
+  `forwardHttps` (connect.ts).
+- **The proxy's commit clobbered the wrapper's result on a shared store.** On
+  the documented shared-store path the proxy called
+  `store.commit(idemKey, { requestSig, status })` before the wrapper's fn
+  resolved, so the wrapper's later commit hit the committed-no-op and a same-key
+  retry replayed the proxy's bookkeeping instead of fn's real return value. The
+  proxy now commits WITHOUT a result (the payload was redundant), and a new
+  `store.setResult(key, result)` — called by `idemStep()` after fn resolves —
+  publishes fn's real return value onto the committed record. Scoped to the
+  shared-store path; the default separate-store usage is unaffected.
+
+[0.4.0]: https://github.com/SuperMarioYL/idemstep/releases/tag/v0.4.0
+
 ## [0.3.0] - 2026-06-19
 
 Hardens the proxy under concurrency and flaky upstreams, validates the on-disk
