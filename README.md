@@ -8,7 +8,7 @@
 
 <p align="center">
   <a href="./LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT" /></a>
-  <img src="https://img.shields.io/badge/release-v0.4.0-7c5cff.svg" alt="Release v0.4.0" />
+  <img src="https://img.shields.io/github/v/release/SuperMarioYL/idemstep?color=7c5cff" alt="Latest release" />
   <a href="./.github/workflows/ci.yml"><img src="https://img.shields.io/badge/CI-vitest-success.svg" alt="CI: vitest" /></a>
   <img src="https://img.shields.io/badge/node-%3E%3D20-339933.svg?logo=node.js&logoColor=white" alt="Node >= 20" />
   <img src="https://img.shields.io/badge/exactly--once-✓-0db7a4.svg" alt="Exactly-once" />
@@ -139,7 +139,7 @@ Two processes, no orchestration — a wrapper guards the client-side effect, a p
 - **`idemStep(label, key, fn)`** — first call runs `fn`, caches the result, marks the key `committed`. A later call with the same key short-circuits `fn` and replays the cached result.
 - **The proxy** — computes a `requestSig` (`method + host + path + body-hash`) for every outbound request carrying an `x-idem-key`. If the key is already `committed`, it replays the cached response instead of forwarding — even if the retry's body has drifted, since the key denotes one logical action. Two concurrent same-key requests coalesce onto a single forward. The retry never reaches the upstream site.
 - **HTTPS, not just plaintext** — `startProxy({ https: true })` (CLI `--https`) terminates `CONNECT host:443` tunnels with a locally-trusted MITM leaf cert and runs the same dedup over the decrypted traffic, so exactly-once works against real https checkout sites. Trust the proxy's `caCertPem` in your client. Pass-through only — it never rewrites bodies, headers, or tokens. Requires the system `openssl`.
-- **`IdemStore`** — in-memory by default; pass `--store path.json` to the CLI (or `new IdemStore({ filePath })`) so dedup state survives a process restart. Pass `ttlMs` (CLI `--ttl`) to expire committed keys after a window — past it, a retry is a genuinely new action, and the store stays bounded across a long-running session. Redis/Postgres are out of scope.
+- **`IdemStore`** — in-memory by default; pass `--store path.json` to the CLI (or `new IdemStore({ filePath })`) so dedup state survives a process restart. Pass `ttlMs` (CLI `--ttl`) to expire committed keys after a window — past it, a retry is a genuinely new action, and the store stays bounded across a long-running session. The JSON-file write is atomic (temp + rename) and a corrupt file is surfaced on startup via `store.loadError` rather than silently swallowed, so a crash mid-persist can no longer lose every committed key and let a retry double-submit unnoticed. Redis/Postgres are out of scope.
 
 Honest scope: IdemStep does **not** ask the third-party site to cooperate — it cannot inject a key a site you don't control will honor. It dedups *client-side* by replaying the request you already committed. That is replay-suppression in a proxy you own, not server-side idempotency.
 
@@ -170,7 +170,7 @@ IdemStep is not a harness and does not compete with one — it is the dedup half
 | `setDefaultStore` / `getDefaultStore` | — | Swap the process-wide store `idemStep` uses by default. |
 | `IDEM_KEY_HEADER` | `"x-idem-key"` | Header the proxy reads to opt a request into dedup. |
 
-CLI: `idemstep proxy [--port N] [--host H] [--store path.json] [--ttl MS] [--https]` for the local proxy, or `idemstep hosted` for the single-tenant hosted dedup proxy preview (same flags; binds `0.0.0.0`, durable `--store`, dedup logged server-side).
+CLI: `idemstep proxy [--port N] [--host H] [--store path.json] [--ttl MS] [--https]` for the local proxy, or `idemstep hosted [--api-keys SPEC]` for the hosted dedup proxy — single-tenant by default, or multi-tenant with `--api-keys` (per-operator `x-idem-api-key` auth + per-key namespacing so operators sharing one URL never collide; same flags; binds `0.0.0.0`, durable `--store`, dedup logged server-side).
 
 ## Pricing
 
@@ -179,11 +179,11 @@ The OSS core — the local proxy and the `idemStep` wrapper — is free and self
 | Plan | Price | What you get |
 | --- | --- | --- |
 | **Open Source** | Free | Local in-process proxy + `idemStep` wrapper, in-memory / JSON-file store, all milestones in this repo. |
-| **Hosted Proxy (self-hosted preview — v0.4.0)** | Free | `idemstep hosted` runs the same interception layer bound to a configurable host/port with a durable JSON-file store, so a remote Playwright context gets managed exactly-once without you operating the proxy. Single-tenant only — no auth/billing. |
+| **Hosted Proxy (self-hosted — v0.4.0 / v0.5.0)** | Free | `idemstep hosted` runs the same interception layer bound to a configurable host/port with a durable JSON-file store, so a remote Playwright context gets managed exactly-once without you operating the proxy. v0.5.0 adds `--api-keys` for multi-tenant per-operator auth + per-key namespacing (single-operator auth/routing only; team plans/billing remain future v0.6.0+). |
 | **Hosted Proxy — Starter** | **$49 / mo** | One managed dedup endpoint, 10k deduped transactional steps/mo, durable key store. Point `proxy.server` at the hosted URL — zero code change. |
 | **Hosted Proxy — Team** | **$199 / mo** | Multiple endpoints, 100k steps/mo, shared key store, retention/audit log of suppressed duplicates. Overage ~$1 / additional 1k steps. |
 
-The hosted dedup proxy is the v0.2 monetization seam: teams running agents on real-money checkout/booking flows pay for managed exactly-once instead of operating the cross-site interception layer themselves. v0.4.0 ships the first concrete step — `idemstep hosted`, a self-hostable single-tenant preview of that interception layer (free, MIT). The managed multi-tenant tiers above (Starter/Team, with auth, billing, and a dashboard) remain future v0.5.0+. The conversion moment is a one-line swap — point your existing Playwright `proxy.server` at the hosted endpoint and watch the suppressed-duplicate count climb.
+The hosted dedup proxy is the v0.2 monetization seam: teams running agents on real-money checkout/booking flows pay for managed exactly-once instead of operating the cross-site interception layer themselves. v0.4.0 shipped the first concrete step — `idemstep hosted`, a self-hostable single-tenant preview of that interception layer (free, MIT). v0.5.0 takes the next step: `--api-keys` adds per-operator API-key auth + per-key namespacing so multiple operators share one hosted URL in isolated namespaces. The managed tiers above (Starter/Team, with team management, billing, and a dashboard) remain future v0.6.0+. The conversion moment is a one-line swap — point your existing Playwright `proxy.server` at the hosted endpoint and watch the suppressed-duplicate count climb.
 
 ## Roadmap
 
@@ -194,7 +194,9 @@ The hosted dedup proxy is the v0.2 monetization seam: teams running agents on re
 - [x] **HTTPS / CONNECT tunnel (v0.3)** — MITM interception so dedup works against real https sites; `examples/place-order-https.ts` proves exactly-once over TLS.
 - [x] **Reliability fixes (v0.4)** — four exactly-once fixes: the wrapper leaking a `pending` record on reject, the CLI firing `main()` on an `index.js`/`index.ts` import, a truncated upstream response hanging the client, and the proxy's commit clobbering the shared-store wrapper's result.
 - [x] **Hosted dedup proxy preview (v0.4)** — `idemstep hosted`: the cross-site interception layer bound to a configurable host/port with a durable JSON-file store, single-tenant, dedup logged server-side.
-- [ ] **Managed multi-tenant hosted tier** — auth, team plans, billing, dashboard (the paid tier beyond the v0.4 self-hosted preview).
+- [x] **Hosted multi-tenant API-key auth (v0.5)** — `idemstep hosted --api-keys`: per-operator API-key auth + per-key IdemStore namespacing, so multiple operators share one hosted URL in isolated namespaces (single-operator auth/routing only; team/billing remain future v0.6.0+).
+- [x] **Exactly-once reliability fixes (v0.5)** — atomic JSON-store persist + fail-loud load (no silent key loss on a crash), `commit` no-op on a missing record (shared-store proxy-error race), and `pathToFileURL`-based CLI direct-run detection (spaces/symlinks no longer silently no-op).
+- [ ] **Managed multi-tenant hosted tier** — team plans, billing, dashboard (the paid tier beyond the v0.5 self-hosted multi-tenant step).
 - [ ] **Auto-detection of side-effecting steps** — POST/submit heuristics so the default path needs zero annotation.
 - [ ] **Duplicate-detection / reconcile mode** — post-hoc detection alongside prevention.
 - [ ] **More bindings** — Puppeteer, Selenium, native browser-use adapter.

@@ -4,6 +4,70 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-07-03
+
+Reliability-and-monetization-continuation release. Takes the deliberate next
+step of the hosted-proxy monetization seam — multi-tenant API-key auth + per-key
+namespacing on the `idemstep hosted` proxy — and folds three high-confidence
+exactly-once / CLI defects the bug-hunter verified in the shipped v0.4.0 source.
+
+### Added
+
+- **Hosted dedup proxy multi-tenant API-key auth — `idemstep hosted --api-keys`
+  (single-operator auth/routing).** Multiple operators now point a remote
+  Playwright context at the SAME hosted proxy URL and get managed exactly-once
+  in ISOLATED per-key namespaces, without operating the proxy themselves. The
+  `idemstep hosted` command gains a `--api-keys` flag (a comma-separated list
+  or a path to a file with one key per line); each operator stamps
+  `x-idem-api-key: <key>` on a transactional request, the proxy authenticates
+  it (401 on a missing/unknown key) and namespaces the idempotency key by a
+  hash of the API key — so one shared JSON-file store isolates tenants and the
+  in-flight coalescing map stays per-operator too. `startProxy` and the CONNECT
+  tunnel gain an opt-in `authorizeKey` hook (the namespacing logic lives in
+  `src/index.ts`); single-tenant mode (no hook) is byte-for-byte unchanged.
+  Scoped to single-operator API-key auth + routing only; team management, team
+  plans, and billing remain out of scope (future v0.6.0+).
+
+### Fixed
+
+- **A mid-write crash corrupted the JSON store and the next start silently lost
+  every committed key.** `persist()` used a bare truncate-then-write
+  `writeFileSync`, and `load()` wrapped `JSON.parse` in a bare `catch {}` that
+  returned silently — so a crash (OOM / SIGKILL / power loss) or disk-full
+  during a persist left a truncated/partial file and the next start began EMPTY
+  with no log, breaking exactly-once on the durable/hosted path (a same-key
+  retry was forwarded as a new action, a double-submit). `persist()` now writes
+  to a sibling `.tmp` and renames it over the target (atomic on POSIX), and
+  `load()` surfaces a parse or shape error via a new public `store.loadError`
+  field that the `hosted` / `proxy` CLI logs on startup — fail-loud, not
+  fail-open.
+- **`idemStep` rejected with an internal "no pending record" invariant on the
+  shared-store path when the proxy's upstream errored.** On the documented
+  shared-store path (wrapper + proxy sharing one JSON-file store), when the
+  proxy's upstream errors, `forward()`'s `fail()` calls `store.delete(key)` and
+  writes a 502 BEFORE the wrapper's `fn` resolves; if `fn` then handles the 502
+  gracefully and returns a result without throwing, the wrapper's
+  `store.commit(key, result)` landed on a missing record. `commit` was the only
+  mutator that threw on a missing record (setResult/setRequestSig/
+  setCachedResponse/setInflight all no-op'd), so `idemStep` rejected with that
+  invariant instead of returning `fn`'s result. `commit` now no-ops (returns
+  `undefined`) on a missing record, consistent with the other mutators;
+  `idemStep`'s existing `store.commit + store.setResult` then handles all three
+  cases (separate-store pending; shared-store proxy-committed; shared-store
+  proxy-deleted).
+- **The CLI silently no-op'd when the entry path contained a space or crossed a
+  symlink.** `invokedDirectly` compared `import.meta.url` to the string-concat
+  `file://${process.argv[1]}`; `import.meta.url` is URL-encoded and
+  symlink-realpath-resolved while the concat form is neither, so they mismatched
+  whenever `process.argv[1]` contained a space (literal space vs `%20`) or
+  crossed a symlink (e.g. `/tmp` → `/private/tmp` on macOS) — `main()` never
+  ran and `idemstep proxy` / `hosted` printed nothing. The check now uses
+  `pathToFileURL(realpathSync(process.argv[1])).href === import.meta.url`
+  (handles spaces, symlinks, relative paths, and Windows drive letters), with
+  the `endsWith("idemstep")` bin-symlink fallback retained.
+
+[0.5.0]: https://github.com/SuperMarioYL/idemstep/releases/tag/v0.5.0
+
 ## [0.4.0] - 2026-06-29
 
 Reliability and monetization-preview release. Folds four verified correctness
