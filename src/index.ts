@@ -26,8 +26,9 @@ export {
   startProxy,
   IDEM_KEY_HEADER,
   IDEM_REPLAYED_HEADER,
+  IDEM_API_KEY_HEADER,
 } from "./proxy.js";
-export type { ProxyOptions, RunningProxy } from "./proxy.js";
+export type { ProxyOptions, RunningProxy, AuthorizeKey } from "./proxy.js";
 export { CertAuthority, attachConnectTunnel } from "./connect.js";
 export type { ConnectTunnelOptions } from "./connect.js";
 export {
@@ -37,8 +38,11 @@ export {
 } from "./key.js";
 export type { IdemKey, RequestShape } from "./key.js";
 
-import { startProxy } from "./proxy.js";
+import { startProxy, IDEM_API_KEY_HEADER, type AuthorizeKey } from "./proxy.js";
 import { IdemStore } from "./store.js";
+import { createHash } from "node:crypto";
+import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { pathToFileURL } from "node:url";
 
 interface ParsedArgs {
   command?: string;
@@ -48,6 +52,8 @@ interface ParsedArgs {
   ttlMs?: number;
   https: boolean;
   help: boolean;
+  /** `--api-keys` value: a comma-separated list or a path to a keys file. */
+  apiKeys?: string;
 }
 
 function parseArgs(argv: string[]): ParsedArgs {
@@ -60,6 +66,7 @@ function parseArgs(argv: string[]): ParsedArgs {
     else if (arg === "--store" || arg === "-s") out.store = argv[++i];
     else if (arg === "--ttl" || arg === "-t") out.ttlMs = Number(argv[++i]);
     else if (arg === "--https") out.https = true;
+    else if (arg === "--api-keys") out.apiKeys = argv[++i];
     else if (!arg.startsWith("-") && out.command === undefined) out.command = arg;
   }
   return out;
@@ -69,17 +76,23 @@ const USAGE = `idemstep — exactly-once for browser-agent transactional steps
 
 Usage:
   idemstep proxy  [--port N] [--host H] [--store path.json] [--https]
-  idemstep hosted [--port N] [--host H] [--store path.json] [--https]
+  idemstep hosted [--port N] [--host H] [--store path.json] [--https] [--api-keys SPEC]
 
 Commands:
   proxy   Start the local interception proxy. Point Playwright at it via
           { proxy: { server: "http://localhost:PORT" } } and wrap your
           transactional step with idemStep("place_order", key, fn).
-  hosted  Start a single-tenant hosted dedup proxy — the same interception
-          layer, bound to a configurable host/port with a durable JSON-file
-          store, so a remote Playwright context gets managed exactly-once
-          without operating the proxy itself. Dedup events are logged here.
-          Single-tenant only: no auth, no team plans, no billing (future v0.5).
+  hosted  Start a hosted dedup proxy — the same interception layer, bound to a
+          configurable host/port with a durable JSON-file store, so a remote
+          Playwright context gets managed exactly-once without operating the
+          proxy itself. Dedup events are logged here.
+          With --api-keys it is MULTI-TENANT: multiple operators point a remote
+          context at the same URL and get managed exactly-once in ISOLATED
+          per-key namespaces (one shared JSON-file store; each idempotency key
+          is namespaced by a hash of the operator's API key so tenants never
+          collide). Without --api-keys it is single-tenant (no auth).
+          Scoped to single-operator API-key auth + routing only; team plans,
+          billing, and local-library multi-user remain future v0.6.0+.
 
 Options:
   -p, --port N      Port to listen on (default: 8473)
@@ -93,8 +106,60 @@ Options:
       --https       Intercept HTTPS via a CONNECT+MITM tunnel so dedup works
                     against real https sites (requires openssl; prints the CA
                     cert to trust in the client).
+      --api-keys SPEC  (hosted only) Comma-separated API keys ("k1,k2") OR a
+                    path to a file with one key per line (blank/# lines ignored).
+                    Each operator sends x-idem-api-key: <key> on a transactional
+                    request; dedup state is namespaced per key. Omit for
+                    single-tenant mode.
   -h, --help        Show this help
 `;
+
+/**
+ * Resolve a `--api-keys` spec into the list of accepted API keys. A spec is
+ * either a comma-separated list ("k1,k2,k3") or, when it points at an existing
+ * file, one key per line (blank lines and `#`-prefixed comments ignored).
+ */
+function loadApiKeys(spec: string): string[] {
+  if (existsSync(spec) && statSync(spec).isFile()) {
+    return readFileSync(spec, "utf8")
+      .split("\n")
+      .map((l) => l.trim())
+      .filter((l) => l.length > 0 && !l.startsWith("#"));
+  }
+  return spec
+    .split(",")
+    .map((k) => k.trim())
+    .filter((k) => k.length > 0);
+}
+
+/**
+ * Build the multi-tenant auth + namespacing hook for the hosted proxy. Each
+ * transactional request must carry a recognized `x-idem-api-key`; the
+ * operator's key is hashed (never written to the store in raw form) and
+ * prepended to the idempotency key, so one shared JSON-file store isolates
+ * operators by namespace and the in-flight coalescing map stays per-operator
+ * too. An unknown/missing key returns `null` → the proxy responds 401 and does
+ * not forward.
+ */
+function makeAuthorizer(apiKeys: string[]): AuthorizeKey {
+  const valid = new Set(apiKeys);
+  return (req, idemKey) => {
+    const raw = req.headers[IDEM_API_KEY_HEADER];
+    const apiKey = Array.isArray(raw) ? raw[0] : raw;
+    if (!apiKey || !valid.has(apiKey)) return null;
+    const ns = createHash("sha256").update(apiKey).digest("hex").slice(0, 16);
+    return `${ns}::${idemKey}`;
+  };
+}
+
+/** Surface a durable-store load failure on startup (fail-loud, not fail-open). */
+function warnIfLoadError(store: IdemStore, label: string): void {
+  if (store.loadError) {
+    process.stderr.write(
+      `idemstep ${label}: WARNING — ${store.loadError.message}\n`,
+    );
+  }
+}
 
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
@@ -106,6 +171,7 @@ async function main(): Promise<void> {
 
   if (args.command === "proxy") {
     const store = new IdemStore({ filePath: args.store, ttlMs: args.ttlMs });
+    warnIfLoadError(store, "proxy");
     const proxy = await startProxy({
       port: args.port ?? 8473,
       host: args.host,
@@ -140,29 +206,59 @@ async function main(): Promise<void> {
   }
 
   if (args.command === "hosted") {
-    // A deployable single-tenant hosted dedup proxy: the existing interception
-    // layer bound to a configurable host/port with a durable JSON-file store,
-    // so a remote Playwright context gets managed exactly-once without
-    // operating the proxy itself. Dedup events are logged server-side (here).
-    // Scoped to single-tenant interception only — no auth / team plans /
-    // billing / Redis (future v0.5+).
+    // A deployable hosted dedup proxy: the existing interception layer bound
+    // to a configurable host/port with a durable JSON-file store, so a remote
+    // Playwright context gets managed exactly-once without operating the proxy
+    // itself. With --api-keys it is multi-tenant (per-operator API-key auth +
+    // per-key IdemStore namespacing); without, single-tenant. Team plans,
+    // billing, and local-library multi-user remain out of scope (v0.6.0+).
     const host = args.host ?? "0.0.0.0";
     const storePath = args.store ?? "idemstep-hosted.json";
     const store = new IdemStore({ filePath: storePath, ttlMs: args.ttlMs });
+    warnIfLoadError(store, "hosted");
+
+    let authorizeKey: AuthorizeKey | undefined;
+    let multiTenant = false;
+    if (args.apiKeys !== undefined) {
+      const apiKeys = loadApiKeys(args.apiKeys);
+      if (apiKeys.length === 0) {
+        process.stderr.write(
+          `idemstep hosted: --api-keys provided no keys (got "${args.apiKeys}")\n`,
+        );
+        process.exitCode = 1;
+        return;
+      }
+      authorizeKey = makeAuthorizer(apiKeys);
+      multiTenant = true;
+    }
+
     const proxy = await startProxy({
       port: args.port ?? 8473,
       host,
       store,
       https: args.https,
+      authorizeKey,
     });
     const displayHost = host === "0.0.0.0" ? "<this-host>" : host;
-    process.stdout.write(
-      `idemstep hosted dedup proxy ready on http://${host}:${proxy.port} (single-tenant, no auth)\n` +
-        `point a remote Playwright context at it: ` +
-        `{ proxy: { server: "http://${displayHost}:${proxy.port}" } }\n` +
-        `dedup state: ${storePath} (durable across restarts); ` +
-        `dedup events are logged here as they are suppressed.\n`,
-    );
+    if (multiTenant) {
+      process.stdout.write(
+        `idemstep hosted dedup proxy ready on http://${host}:${proxy.port} (multi-tenant, per-key namespacing)\n` +
+          `point a remote Playwright context at it: ` +
+          `{ proxy: { server: "http://${displayHost}:${proxy.port}" } }\n` +
+          `send x-idem-api-key: <your-key> on each transactional request; ` +
+          `dedup state is isolated per key.\n` +
+          `dedup state: ${storePath} (durable across restarts); ` +
+          `dedup events are logged here per key as they are suppressed.\n`,
+      );
+    } else {
+      process.stdout.write(
+        `idemstep hosted dedup proxy ready on http://${host}:${proxy.port} (single-tenant, no auth)\n` +
+          `point a remote Playwright context at it: ` +
+          `{ proxy: { server: "http://${displayHost}:${proxy.port}" } }\n` +
+          `dedup state: ${storePath} (durable across restarts); ` +
+          `dedup events are logged here as they are suppressed.\n`,
+      );
+    }
     if (args.https) {
       if (proxy.caCertPem) {
         process.stdout.write(
@@ -191,18 +287,32 @@ async function main(): Promise<void> {
 }
 
 // Only run the CLI when executed directly (not when imported as a library).
-// The primary check covers `node dist/index.js` / `tsx src/index.ts` (argv[1] is
-// this module's own path); the `endsWith("idemstep")` fallback covers the bin
-// symlink. The previous `endsWith("index.js")`/`endsWith("index.ts")` fallbacks
-// were dropped: they fired as false positives whenever a *consumer's* entry
-// script was named index.js/ts and merely imported idemstep, printing the USAGE
-// banner into their stdout on a side-effect-free import.
-const invokedDirectly =
-  process.argv[1] !== undefined &&
-  (import.meta.url === `file://${process.argv[1]}` ||
-    process.argv[1].endsWith("idemstep"));
+// `import.meta.url` is URL-encoded and symlink-realpath-resolved, so the
+// comparison must be too: a bare `file://${process.argv[1]}` string-concat is
+// neither, and mismatches whenever argv[1] contains a space (literal space vs
+// %20) or crosses a symlink (e.g. /tmp → /private/tmp on macOS) — `main()`
+// then silently no-ops and `idemstep proxy` / `hosted` prints nothing. We
+// realpath argv[1] first (so a symlinked entry matches the resolved module
+// URL), then build a proper file: URL via `pathToFileURL` (handles spaces,
+// relative paths, and Windows drive letters). The `endsWith("idemstep")`
+// fallback still covers the published bin symlink, whose argv[1] is the
+// symlink name rather than this module's path.
+function invokedDirectly(): boolean {
+  const entry = process.argv[1];
+  if (entry === undefined) return false;
+  if (entry.endsWith("idemstep")) return true; // published bin symlink
+  let real = entry;
+  try {
+    real = realpathSync(entry);
+  } catch {
+    // entry path missing or unresolvable — fall back to the literal entry so
+    // this edge never throws; the equality check simply fails instead.
+    real = entry;
+  }
+  return pathToFileURL(real).href === import.meta.url;
+}
 
-if (invokedDirectly) {
+if (invokedDirectly()) {
   main().catch((err) => {
     process.stderr.write(`idemstep: ${err instanceof Error ? err.message : String(err)}\n`);
     process.exit(1);

@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import type { IdemKey } from "./key.js";
 
 export type StepStatus = "pending" | "committed";
@@ -65,6 +65,17 @@ export class IdemStore {
   private readonly records = new Map<IdemKey, StepRecord>();
   private readonly filePath?: string;
   private readonly ttlMs: number;
+  /**
+   * Set when {@link load} could not recover the store file (a truncated or
+   * partial JSON file left by a crash mid-persist, or a top level that is not a
+   * record array). The store starts clean in that case, but the hosted / proxy
+   * CLI logs this on startup so an operator knows exactly-once state was reset
+   * — fail-loud, not fail-open. A silent reset would let a same-key retry be
+   * forwarded as a new action (a double-submit) with zero operator visibility,
+   * breaking exactly-once on the durable path. `undefined` when no file was
+   * loaded or the file was valid.
+   */
+  loadError?: Error;
 
   constructor(options: IdemStoreOptions = {}) {
     this.filePath = options.filePath;
@@ -134,15 +145,29 @@ export class IdemStore {
    * retry, or the wrapper's commit landing after the proxy's network-commit on
    * a shared store) must never re-stamp the result or `committedAt`.
    *
+   * Committing a key with *no* record is also a no-op (returns `undefined`),
+   * consistent with the other mutators ({@link setResult}/{@link setRequestSig}
+   * /{@link setCachedResponse}/{@link setInflight}). This matters on the
+   * documented shared-store path: when the proxy's upstream errors, `forward`'s
+   * `fail()` calls `store.delete(commit.idemKey)` BEFORE the wrapper's `fn`
+   * resolves; if `fn` then handles the 502 gracefully and returns a result
+   * without throwing, the wrapper's later `store.commit(key, result)` would
+   * land on a missing record. Throwing here (as v0.4.0 did) surfaced an
+   * internal "no pending record" invariant and made `idemStep` reject instead
+   * of returning `fn`'s result; no-op-ing keeps that race quiet. `idemStep`
+   * follows this with `store.setResult(key, result)` (also a no-op on a missing
+   * record), so all three cases work: separate-store pending (commit +
+   * publish), shared-store proxy-committed (commit no-ops, `setResult`
+   * publishes `fn`'s real result), shared-store proxy-deleted (both no-op,
+   * return `fn`'s result).
+   *
    * `result` is optional so the proxy can commit a key WITHOUT setting a result
    * (its network-commit is bookkeeping, not the user-facing return value); the
    * wrapper then publishes `fn`'s real return value via {@link setResult}.
    */
-  commit(key: IdemKey, result?: unknown): StepRecord {
+  commit(key: IdemKey, result?: unknown): StepRecord | undefined {
     const record = this.records.get(key);
-    if (!record) {
-      throw new Error(`IdemStore.commit: no pending record for key "${key}"`);
-    }
+    if (!record) return undefined;
     if (record.status === "committed") return record;
     record.status = "committed";
     if (result !== undefined) record.result = result;
@@ -284,7 +309,19 @@ export class IdemStore {
       ({ inflight: _inflight, ...rest }) => rest,
     );
     const data = JSON.stringify(serializable, null, 2);
-    writeFileSync(this.filePath, data, "utf8");
+    // Atomic write: serialize to a sibling temp file then rename it over the
+    // target. `rename` is atomic on POSIX (and on Windows when both paths are
+    // on the same volume), so a crash (OOM / SIGKILL / power loss) or disk-full
+    // mid-persist cannot leave a truncated or partial store file. Without this
+    // — a bare truncate-then-write — a crashed persist would corrupt the file
+    // and the next start's load() would silently swallow the parse error and
+    // start EMPTY, losing every committed key and letting a same-key retry be
+    // forwarded as a new action (a double-submit) with zero operator visibility.
+    // `persist()` runs synchronously on every mutation, so the crash window is
+    // non-trivial over a long session (notably the hosted proxy's durable path).
+    const tmp = `${this.filePath}.tmp`;
+    writeFileSync(tmp, data, "utf8");
+    renameSync(tmp, this.filePath);
   }
 
   private load(): void {
@@ -293,14 +330,28 @@ export class IdemStore {
       const raw = readFileSync(this.filePath, "utf8");
       const parsed: unknown = JSON.parse(raw);
       // A valid store file is an array of records. Anything else (an object, a
-      // bare value, null) is treated as a corrupt file and ignored.
-      if (!Array.isArray(parsed)) return;
+      // bare value, null) is a shape error: surface it via loadError so the
+      // hosted / proxy CLI can warn on startup, then start clean.
+      if (!Array.isArray(parsed)) {
+        this.loadError = new Error(
+          `idemstep store file ${this.filePath} is not a record array (got ${
+            parsed === null ? "null" : typeof parsed
+          }); starting clean — previously-committed keys were lost`,
+        );
+        return;
+      }
       for (const candidate of parsed) {
         const record = this.sanitizeLoadedRecord(candidate);
         if (record) this.records.set(record.key, record);
       }
-    } catch {
-      // Corrupt or empty store file — start clean rather than crash.
+    } catch (err) {
+      // A truncated / partial / unparseable store file (exactly what a crash
+      // mid-persist left before the atomic-rename fix). Start clean rather than
+      // crash, BUT surface the loss via loadError so the hosted / proxy CLI
+      // logs it on startup — fail-loud, not fail-open. The v0.4.0 bare `catch
+      // {}` returned silently, so an operator never learned that every
+      // committed key was gone and a same-key retry would now double-submit.
+      this.loadError = err instanceof Error ? err : new Error(String(err));
     }
   }
 

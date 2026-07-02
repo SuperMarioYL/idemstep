@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -88,5 +88,41 @@ describe("v0.4.0: CLI is side-effect-free on import", () => {
       env: process.env,
     });
     expect(out).toContain(BANNER_MARKER);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// v0.5.0 fix-cli-invoked-directly-path-fragility: invokedDirectly compared
+// import.meta.url to the string-concat `file://${process.argv[1]}`. Because
+// import.meta.url is URL-encoded and symlink-realpath-resolved while the concat
+// form is neither, they mismatched whenever argv[1] contained a space (literal
+// space vs %20) or crossed a symlink (e.g. /tmp → /private/tmp on macOS) —
+// main() silently no-op'd and `idemstep proxy`/`hosted` printed nothing. The
+// fix uses pathToFileURL(realpathSync(argv[1])).href so the comparison handles
+// spaces, symlinks, relative paths, and Windows drive letters.
+// ---------------------------------------------------------------------------
+describe("v0.5.0: CLI runs main() from an entry path containing a space", () => {
+  it("prints the banner when run from a temp dir whose path contains a space", () => {
+    // A temp dir whose NAME contains a space — reproduces both the literal-space
+    // (vs %20) and the macOS /var→/private/var realpath mismatch in one shot.
+    // The entry is a SYMLINK to the real src/index.ts: tsx follows it to the
+    // real file (so `import "express"` resolves from the repo's node_modules),
+    // while process.argv[1] stays the spaced symlink path — exactly the shape
+    // that broke the string-concat invokedDirectly check.
+    const dir = mkdtempSync(join(tmpdir(), "idem cli space-"));
+    try {
+      const entry = join(dir, "index.ts");
+      symlinkSync(SRC_INDEX_TS, entry);
+      const out = execFileSync(TSX, [entry, "--help"], {
+        encoding: "utf8",
+        cwd: process.cwd(),
+        env: process.env,
+      });
+      // Before the fix: the string-concat check mismatched on the space + the
+      // /var realpath, invokedDirectly was false, and the banner never printed.
+      expect(out).toContain(BANNER_MARKER);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

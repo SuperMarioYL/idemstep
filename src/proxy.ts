@@ -17,6 +17,32 @@ export const IDEM_KEY_HEADER = "x-idem-key";
 /** Header the proxy stamps on a replayed response so callers can see dedup. */
 export const IDEM_REPLAYED_HEADER = "x-idem-replayed";
 
+/**
+ * Header an operator stamps on a transactional request to authenticate to the
+ * multi-tenant hosted proxy (`idemstep hosted --api-keys`). The proxy reads it
+ * to resolve the per-operator namespace, then strips it before forwarding
+ * upstream (it is proxy-control metadata, not destined for the target site).
+ * Single-tenant mode (`idemstep proxy`, or `hosted` without `--api-keys`)
+ * never consults this header.
+ */
+export const IDEM_API_KEY_HEADER = "x-idem-api-key";
+
+/**
+ * Multi-tenant hook for `idemstep hosted --api-keys`. Called for every
+ * transactional request carrying an `x-idem-key`. Return the (possibly
+ * rewritten) idempotency key to dedup under — the hosted proxy returns
+ * `${sha256(apiKey).slice(0,16)}::${original}` so one shared JSON-file store
+ * isolates operators by namespace, and the proxy's in-flight coalescing map
+ * (also keyed by the idempotency key) stays per-operator too. Return `null` to
+ * reject the request as unauthorized (the proxy responds 401 and does NOT
+ * forward). When omitted, the proxy uses the raw `x-idem-key` verbatim
+ * (single-tenant mode) — so all existing single-tenant behavior is unchanged.
+ */
+export type AuthorizeKey = (
+  req: http.IncomingMessage,
+  idemKey: string,
+) => string | null;
+
 export interface ProxyOptions {
   /** Port to listen on. 0 picks a free port (returned by `start`). */
   port?: number;
@@ -55,6 +81,13 @@ export interface ProxyOptions {
    * public certs need none of this. Only consulted when `https: true`.
    */
   upstreamTls?: { ca?: string | string[] | Buffer | Buffer[]; rejectUnauthorized?: boolean };
+  /**
+   * Multi-tenant auth + per-operator key namespacing hook (used by `idemstep
+   * hosted --api-keys`). See {@link AuthorizeKey}. When omitted, the proxy is
+   * single-tenant and uses the raw `x-idem-key` verbatim — the default for
+   * `idemstep proxy` and for `hosted` without `--api-keys`.
+   */
+  authorizeKey?: AuthorizeKey;
 }
 
 export interface RunningProxy {
@@ -122,13 +155,31 @@ export function startProxy(options: ProxyOptions = {}): Promise<RunningProxy> {
       return;
     }
 
-    const idemKey = headerValue(req.headers[IDEM_KEY_HEADER]);
+    let idemKey = headerValue(req.headers[IDEM_KEY_HEADER]);
     const rawBody = (req as RawBodyRequest).rawBody ?? Buffer.alloc(0);
 
     // Non-transactional traffic (no idempotency key) is forwarded untouched.
     if (!idemKey) {
       forward(target, req, rawBody, res, null, store, log);
       return;
+    }
+
+    // Multi-tenant hosted mode: authenticate the operator (401 on a
+    // missing/unknown x-idem-api-key) and namespace the idempotency key by the
+    // operator so one shared store — and the in-flight coalescing map — isolates
+    // tenants. Single-tenant mode (no authorizeKey hook) leaves the raw key
+    // untouched, exactly as before. The namespaced key is what gets committed,
+    // replayed, and coalesced downstream, so the rest of the handler is
+    // unchanged.
+    if (options.authorizeKey) {
+      const authorized = options.authorizeKey(req, idemKey);
+      if (authorized === null) {
+        res
+          .status(401)
+          .send("idemstep proxy: unauthorized (valid x-idem-api-key required)");
+        return;
+      }
+      idemKey = authorized;
     }
 
     const sig = requestSignature({
@@ -214,6 +265,7 @@ export function startProxy(options: ProxyOptions = {}): Promise<RunningProxy> {
           onSuppressed: () => {
             suppressed += 1;
           },
+          authorizeKey: options.authorizeKey,
         });
       } catch (err) {
         log(
@@ -320,6 +372,7 @@ function forward(
     // Strip hop-by-hop / idem control headers before forwarding upstream.
     const outHeaders = { ...req.headers } as Record<string, string | string[] | undefined>;
     delete outHeaders[IDEM_KEY_HEADER];
+    delete outHeaders[IDEM_API_KEY_HEADER];
     delete outHeaders["x-idem-label"];
     delete outHeaders["x-idem-target"];
     delete outHeaders["proxy-connection"];

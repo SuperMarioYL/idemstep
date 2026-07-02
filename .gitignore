@@ -30,5 +30,6 @@ BUILD_SETUP_NEXT_STEPS.md
 .builder_*
 .build_metadata*
 .stage_*
+.prebuild_head_*
 DRIFT_REPORT.md
 GIT_AUTHOR_DRIFT.md

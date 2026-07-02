@@ -9,7 +9,7 @@ import { join } from "node:path";
 import { URL } from "node:url";
 import { IdemStore, type CachedResponse } from "./store.js";
 import { requestSignature, type IdemKey } from "./key.js";
-import { IDEM_KEY_HEADER, IDEM_REPLAYED_HEADER } from "./proxy.js";
+import { IDEM_KEY_HEADER, IDEM_API_KEY_HEADER, IDEM_REPLAYED_HEADER, type AuthorizeKey } from "./proxy.js";
 
 /**
  * HTTPS / CONNECT tunnel support for the IdemStep proxy.
@@ -53,6 +53,15 @@ export interface ConnectTunnelOptions {
   log?: (line: string) => void;
   /** Called when a duplicate is suppressed, so the proxy can count it. */
   onSuppressed?: () => void;
+  /**
+   * Multi-tenant auth + per-operator key namespacing hook (mirrors
+   * {@link ProxyOptions.authorizeKey}). When set, the tunnel authenticates each
+   * transactional request and namespaces its idempotency key by the operator,
+   * so HTTPS traffic through the CONNECT tunnel is isolated per tenant exactly
+   * like the plaintext path. When omitted, the raw `x-idem-key` is used
+   * verbatim.
+   */
+  authorizeKey?: AuthorizeKey;
 }
 
 /**
@@ -189,13 +198,27 @@ function tunnelHandler(
     req.on("data", (c: Buffer) => chunks.push(c));
     req.on("end", () => {
       const rawBody = Buffer.concat(chunks);
-      const idemKey = headerValue(req.headers[IDEM_KEY_HEADER]);
+      let idemKey = headerValue(req.headers[IDEM_KEY_HEADER]);
       const target = `https://${host}:${port}${req.url ?? "/"}`;
 
       // Non-transactional traffic (no idempotency key) tunnels through untouched.
       if (!idemKey) {
         forwardHttps(host, port, req, rawBody, res, null, store, log, upstreamTls).catch(() => {});
         return;
+      }
+
+      // Multi-tenant: authenticate the operator and namespace the idempotency key
+      // (mirrors the plaintext proxy's authorizeKey hook) so HTTPS traffic
+      // through the tunnel is isolated per tenant too. A null return is a 401.
+      if (options.authorizeKey) {
+        const authorized = options.authorizeKey(req, idemKey);
+        if (authorized === null) {
+          if (!res.headersSent) {
+            res.writeHead(401).end("idemstep tunnel: unauthorized (valid x-idem-api-key required)");
+          }
+          return;
+        }
+        idemKey = authorized;
       }
 
       const sig = requestSignature({
@@ -273,6 +296,7 @@ function forwardHttps(
     // internal to the proxy and must not leak upstream. NO body/token rewriting.
     const outHeaders = { ...req.headers } as Record<string, string | string[] | undefined>;
     delete outHeaders[IDEM_KEY_HEADER];
+    delete outHeaders[IDEM_API_KEY_HEADER];
     delete outHeaders["x-idem-label"];
     delete outHeaders["proxy-connection"];
     outHeaders.host = url.host;
