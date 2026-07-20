@@ -7,7 +7,7 @@
 </p>
 
 <p align="center">
-  <a href="./LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT" /></a>
+  <a href="./LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue.svg" alt="License: Apache-2.0" /></a>
   <img src="https://img.shields.io/github/v/release/SuperMarioYL/idemstep?color=7c5cff" alt="Latest release" />
   <a href="./.github/workflows/ci.yml"><img src="https://img.shields.io/badge/CI-vitest-success.svg" alt="CI: vitest" /></a>
   <img src="https://img.shields.io/badge/node-%3E%3D20-339933.svg?logo=node.js&logoColor=white" alt="Node >= 20" />
@@ -174,7 +174,7 @@ CLI: `idemstep proxy [--port N] [--host H] [--store path.json] [--ttl MS] [--htt
 
 ## Pricing
 
-The OSS core — the local proxy and the `idemStep` wrapper — is free and self-hostable forever under MIT. The paid tier is the part that is genuinely hard to run yourself reliably across messy real-world sites.
+The OSS core — the local proxy and the `idemStep` wrapper — is free and self-hostable forever under Apache 2.0. The paid tier is the part that is genuinely hard to run yourself reliably across messy real-world sites.
 
 | Plan | Price | What you get |
 | --- | --- | --- |
@@ -183,7 +183,7 @@ The OSS core — the local proxy and the `idemStep` wrapper — is free and self
 | **Hosted Proxy — Starter** | **$49 / mo** | One managed dedup endpoint, 10k deduped transactional steps/mo, durable key store. Point `proxy.server` at the hosted URL — zero code change. |
 | **Hosted Proxy — Team** | **$199 / mo** | Multiple endpoints, 100k steps/mo, shared key store, retention/audit log of suppressed duplicates. Overage ~$1 / additional 1k steps. |
 
-The hosted dedup proxy is the v0.2 monetization seam: teams running agents on real-money checkout/booking flows pay for managed exactly-once instead of operating the cross-site interception layer themselves. v0.4.0 shipped the first concrete step — `idemstep hosted`, a self-hostable single-tenant preview of that interception layer (free, MIT). v0.5.0 takes the next step: `--api-keys` adds per-operator API-key auth + per-key namespacing so multiple operators share one hosted URL in isolated namespaces. The managed tiers above (Starter/Team, with team management, billing, and a dashboard) remain future v0.6.0+. The conversion moment is a one-line swap — point your existing Playwright `proxy.server` at the hosted endpoint and watch the suppressed-duplicate count climb.
+The hosted dedup proxy is the v0.2 monetization seam: teams running agents on real-money checkout/booking flows pay for managed exactly-once instead of operating the cross-site interception layer themselves. v0.4.0 shipped the first concrete step — `idemstep hosted`, a self-hostable single-tenant preview of that interception layer (free, Apache 2.0). v0.5.0 takes the next step: `--api-keys` adds per-operator API-key auth + per-key namespacing so multiple operators share one hosted URL in isolated namespaces. The managed tiers above (Starter/Team, with team management, billing, and a dashboard) remain future v0.6.0+. The conversion moment is a one-line swap — point your existing Playwright `proxy.server` at the hosted endpoint and watch the suppressed-duplicate count climb.
 
 ## Roadmap
 
@@ -203,7 +203,7 @@ The hosted dedup proxy is the v0.2 monetization seam: teams running agents on re
 
 ## License &amp; Contributing
 
-Released under the [MIT License](./LICENSE). Issues and pull requests are welcome — open an [issue](https://github.com/SuperMarioYL/idemstep/issues) for a bug or a request, or send a PR.
+Released under the [Apache License, Version 2.0](./LICENSE). Issues and pull requests are welcome — open an [issue](https://github.com/SuperMarioYL/idemstep/issues) for a bug or a request, or send a PR.
 
 After pushing, set discoverable repo topics:
 
@@ -219,4 +219,4 @@ transactional step with one key so a self-healing retry is deduplicated,
 not duplicated. Retried 2x, ordered 1x. https://github.com/SuperMarioYL/idemstep
 ```
 
-<p align="center"><sub><a href="./LICENSE">MIT</a> © 2026 SuperMarioYL</sub></p>
+<p align="center"><sub><a href="./LICENSE">Apache-2.0</a> © 2026 SuperMarioYL</sub></p>
