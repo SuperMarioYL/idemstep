@@ -4,6 +4,61 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2026-07-21
+
+Reliability-and-ops-continuation release. Closes the write-side gap the v0.5.0
+atomic-persist + load-loud fix left open, fixes a multi-cookie replay defect on
+the dedup-replay path a self-healing retry lands on, and completes the TTL story
+v0.5.0 started with automatic pruning.
+
+### Added
+
+- **Periodic TTL prune for the hosted/proxy proxy — `--prune-interval MS`.** The
+  store's `prune()` (which sweeps TTL-expired committed keys and reclaims their
+  memory) was shipped in v0.5.0 but nothing ever called it periodically. A
+  long-running `idemstep hosted` proxy fielding many one-off transactional keys
+  (each committed once, never looked up again because the self-healing retry
+  already got its replay from the in-flight coalescing map) would accumulate
+  expired-but-not-reclaimed records in the in-memory Map and JSON file forever.
+  `idemstep proxy` / `hosted` now accept `--prune-interval MS`; when a `--ttl`
+  is configured, a `setInterval(() => store.prune(), MS)` (cleared on shutdown,
+  unref'd so it never blocks the event loop) reclaims expired keys automatically
+  so the durable store stays bounded across a multi-day session. Scoped to the
+  existing in-memory + JSON-file store; Redis/Postgres remain out of scope.
+
+### Fixed
+
+- **A replayed duplicate response mangled multi-valued `Set-Cookie` headers
+  into one comma-joined string.** The cache snapshot helper (`flattenHeaders`,
+  now `snapshotHeaders`) collapsed array-valued response headers — notably
+  `Set-Cookie`, which Node's http module collects into a `string[]` — into a
+  single string via `v.join(", ")`. The HTTP first-forward path forwarded raw
+  `upRes.headers` (preserving arrays), but the replay path replayed from the
+  flattened cache, so a suppressed-duplicate response carried ONE joined
+  `Set-Cookie` header line instead of N — and per RFC 6265 a comma-joined
+  `Set-Cookie` cannot be reliably split because cookie values may contain commas
+  (e.g. `Expires=Wed, 09-Jun-2021 ...`). The HTTPS path joined on the first
+  forward too. `CachedResponse.headers` now widens to
+  `Record<string, string | string[]>` and the snapshot helper preserves arrays;
+  `res.setHeader` / `res.writeHead` emit one header line per array element, so a
+  replayed duplicate carries the same multi-valued headers as the original
+  forward. No behaviour change for single-valued headers.
+- **`persist()` failed hard on a disk error instead of failing soft.**
+  `persist()` ran `writeFileSync` + `renameSync` with no try/catch, so an
+  `EACCES` (a read-only/unwritable store dir), `ENOSPC` (disk full), or `ENOENT`
+  (a misconfigured/missing `--store` path) propagated up through `commit()` into
+  `idemStep`'s try block; the catch re-threw it, so `idemStep` rejected with a
+  system error instead of resolving with `fn`'s result — and the catch's
+  `store.delete` abandoned the still-correct in-memory record. This was the
+  write-side gap the v0.5.0 atomic-persist + load-loud fix left open (that fix
+  made the write atomic and the load fail-loud, but `persist()` itself still
+  failed hard). `persist()` now fail-softs: it catches the disk error, sets a
+  new public `store.persistError` field (mirroring `loadError`), and continues
+  serving exactly-once decisions off the in-memory Map; a subsequent successful
+  persist clears it. The hosted/proxy CLI surfaces `persistError` alongside
+  `loadError` on startup so an operator learns dedup state is not being durably
+  recorded.
+
 ## [0.5.0] - 2026-07-03
 
 Reliability-and-monetization-continuation release. Takes the deliberate next

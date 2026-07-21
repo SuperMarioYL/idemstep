@@ -333,7 +333,7 @@ function forwardHttps(
           const respBody = Buffer.concat(chunks);
           const cached: CachedResponse = {
             status: upRes.statusCode ?? 200,
-            headers: flattenHeaders(upRes.headers),
+            headers: snapshotHeaders(upRes.headers),
             bodyBase64: respBody.toString("base64"),
           };
           if (commit) {
@@ -344,7 +344,7 @@ function forwardHttps(
             store.commit(commit.idemKey);
             log(`tunnel committed key=${commit.idemKey} status=${cached.status}`);
           }
-          res.writeHead(upRes.statusCode ?? 200, flattenHeaders(upRes.headers));
+          res.writeHead(upRes.statusCode ?? 200, snapshotHeaders(upRes.headers));
           res.end(respBody);
           resolve(cached);
         });
@@ -366,6 +366,11 @@ function forwardHttps(
 }
 
 function replay(res: http.ServerResponse, cached: CachedResponse): void {
+  // Spread cached.headers (values may be string[] e.g. set-cookie); writeHead
+  // emits one header line per array element, so a replayed duplicate carries
+  // the same multi-valued headers as the original forward (v0.6.0: previously
+  // the cache joined arrays into one comma-joined string, mangling multi-cookie
+  // responses on the replay path).
   res.writeHead(cached.status, { ...cached.headers, [IDEM_REPLAYED_HEADER]: "true" });
   res.end(Buffer.from(cached.bodyBase64, "base64"));
 }
@@ -374,11 +379,24 @@ function headerValue(v: string | string[] | undefined): string | undefined {
   return Array.isArray(v) ? v[0] : v;
 }
 
-function flattenHeaders(headers: http.IncomingHttpHeaders): Record<string, string> {
-  const out: Record<string, string> = {};
+/**
+ * Snapshot the upstream response headers into the cache. Array-valued headers
+ * (notably `set-cookie`, which Node's http module collects into a string[]) are
+ * PRESERVED as arrays — `res.writeHead` emits one header line per array
+ * element, so a replayed duplicate carries the same multi-valued headers as the
+ * original forward. Collapsing arrays into a comma-joined string (the v0.5.0
+ * behaviour) mangled multi-cookie responses on BOTH the first HTTPS forward and
+ * the replay path: per RFC 6265 a comma-joined Set-Cookie cannot be reliably
+ * split because cookie values may contain commas (e.g.
+ * `Expires=Wed, 09-Jun-2021 ...`).
+ */
+function snapshotHeaders(
+  headers: http.IncomingHttpHeaders,
+): Record<string, string | string[]> {
+  const out: Record<string, string | string[]> = {};
   for (const [k, v] of Object.entries(headers)) {
     if (v === undefined) continue;
-    out[k] = Array.isArray(v) ? v.join(", ") : v;
+    out[k] = v;
   }
   return out;
 }

@@ -54,6 +54,8 @@ interface ParsedArgs {
   help: boolean;
   /** `--api-keys` value: a comma-separated list or a path to a keys file. */
   apiKeys?: string;
+  /** `--prune-interval` value in ms: how often to sweep TTL-expired keys. */
+  pruneIntervalMs?: number;
 }
 
 function parseArgs(argv: string[]): ParsedArgs {
@@ -67,6 +69,7 @@ function parseArgs(argv: string[]): ParsedArgs {
     else if (arg === "--ttl" || arg === "-t") out.ttlMs = Number(argv[++i]);
     else if (arg === "--https") out.https = true;
     else if (arg === "--api-keys") out.apiKeys = argv[++i];
+    else if (arg === "--prune-interval") out.pruneIntervalMs = Number(argv[++i]);
     else if (!arg.startsWith("-") && out.command === undefined) out.command = arg;
   }
   return out;
@@ -103,6 +106,11 @@ Options:
                     ` + "`hosted`" + ` defaults to ./idemstep-hosted.json.
   -t, --ttl MS      Expire committed keys after MS milliseconds (default: keep
                     forever). After the window a retry is a new action.
+      --prune-interval MS  (proxy/hosted) How often to sweep TTL-expired
+                    committed keys from the in-memory Map and JSON file so a
+                    long-running proxy reclaims memory (default: never; lookups
+                    expire keys lazily but never-again-looked-up keys linger
+                    without this). No effect when no --ttl is set.
       --https       Intercept HTTPS via a CONNECT+MITM tunnel so dedup works
                     against real https sites (requires openssl; prints the CA
                     cert to trust in the client).
@@ -152,13 +160,52 @@ function makeAuthorizer(apiKeys: string[]): AuthorizeKey {
   };
 }
 
-/** Surface a durable-store load failure on startup (fail-loud, not fail-open). */
-function warnIfLoadError(store: IdemStore, label: string): void {
+/** Surface durable-store load + persist failures (fail-loud, not fail-open). */
+function warnIfStoreErrors(store: IdemStore, label: string): void {
+  // loadError is set on startup when the store file could not be recovered
+  // (truncated/partial JSON from a crash mid-persist, or a non-array shape).
   if (store.loadError) {
     process.stderr.write(
       `idemstep ${label}: WARNING — ${store.loadError.message}\n`,
     );
   }
+  // persistError is set when a durable write failed (EACCES / ENOSPC / ENOENT
+  // on a read-only, full, or missing store dir). On a fresh startup this is
+  // undefined (no mutation has run yet), but surface it if present (e.g. a
+  // pre-warmed store whose first mutation already failed) so an operator
+  // learns dedup state is not being durably recorded.
+  if (store.persistError) {
+    process.stderr.write(
+      `idemstep ${label}: WARNING — durable write failed: ${store.persistError.message} (dedup decisions continue in-memory; fix the --store path to resume durability)\n`,
+    );
+  }
+}
+
+/**
+ * Schedule a periodic `store.prune()` so TTL-expired committed keys are
+ * reclaimed from the in-memory Map and JSON file automatically. Lookups expire
+ * keys lazily, but a long-running proxy fielding many one-off transactional
+ * keys (each committed once, never looked up again because the self-healing
+ * retry already got its replay from the in-flight coalescing map) would
+ * otherwise accumulate expired-but-not-reclaimed records forever. Returns a
+ * disposer that clears the interval on shutdown. The caller gates on ttlMs:
+ * pruning is only meaningful when a TTL is configured (prune() is a no-op
+ * otherwise, so there is no point scheduling the interval).
+ */
+function schedulePrune(
+  store: IdemStore,
+  intervalMs: number,
+  log: (line: string) => void,
+): (() => void) | undefined {
+  if (!Number.isFinite(intervalMs) || intervalMs <= 0) return undefined;
+  const handle = setInterval(() => {
+    const removed = store.prune();
+    if (removed > 0) log(`prune reclaimed ${removed} expired key(s)`);
+  }, intervalMs);
+  // setInterval keeps the event loop alive; unref so it never blocks shutdown
+  // (the SIGINT/SIGTERM handler closes the proxy and calls process.exit(0)).
+  handle.unref?.();
+  return () => clearInterval(handle);
 }
 
 async function main(): Promise<void> {
@@ -171,7 +218,7 @@ async function main(): Promise<void> {
 
   if (args.command === "proxy") {
     const store = new IdemStore({ filePath: args.store, ttlMs: args.ttlMs });
-    warnIfLoadError(store, "proxy");
+    warnIfStoreErrors(store, "proxy");
     const proxy = await startProxy({
       port: args.port ?? 8473,
       host: args.host,
@@ -196,7 +243,13 @@ async function main(): Promise<void> {
         );
       }
     }
+    const pruneLog = (line: string) => console.log(`[idemstep] ${line}`);
+    const stopPrune =
+      args.ttlMs && args.ttlMs > 0 && args.pruneIntervalMs && args.pruneIntervalMs > 0
+        ? schedulePrune(store, args.pruneIntervalMs, pruneLog)
+        : undefined;
     const shutdown = async () => {
+      stopPrune?.();
       await proxy.close();
       process.exit(0);
     };
@@ -215,7 +268,7 @@ async function main(): Promise<void> {
     const host = args.host ?? "0.0.0.0";
     const storePath = args.store ?? "idemstep-hosted.json";
     const store = new IdemStore({ filePath: storePath, ttlMs: args.ttlMs });
-    warnIfLoadError(store, "hosted");
+    warnIfStoreErrors(store, "hosted");
 
     let authorizeKey: AuthorizeKey | undefined;
     let multiTenant = false;
@@ -273,7 +326,13 @@ async function main(): Promise<void> {
         );
       }
     }
+    const pruneLog = (line: string) => console.log(`[idemstep] ${line}`);
+    const stopPrune =
+      args.ttlMs && args.ttlMs > 0 && args.pruneIntervalMs && args.pruneIntervalMs > 0
+        ? schedulePrune(store, args.pruneIntervalMs, pruneLog)
+        : undefined;
     const shutdown = async () => {
+      stopPrune?.();
       await proxy.close();
       process.exit(0);
     };

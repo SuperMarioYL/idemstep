@@ -407,7 +407,7 @@ function forward(
 
           const cached: CachedResponse = {
             status: upRes.statusCode ?? 200,
-            headers: flattenHeaders(upRes.headers),
+            headers: snapshotHeaders(upRes.headers),
             bodyBase64: respBody.toString("base64"),
           };
 
@@ -449,19 +449,34 @@ function forward(
 function replay(res: Response, cached: CachedResponse): void {
   res.status(cached.status);
   for (const [k, v] of Object.entries(cached.headers)) {
+    // `v` may be a string[] (e.g. set-cookie); res.setHeader emits one header
+    // line per array element, so a replayed duplicate carries the same number
+    // of Set-Cookie lines as the original forward (v0.6.0: previously the cache
+    // joined arrays into one comma-joined string, mangling multi-cookie
+    // responses on the replay path a self-healing retry lands on).
     res.setHeader(k, v);
   }
   res.setHeader(IDEM_REPLAYED_HEADER, "true");
   res.end(Buffer.from(cached.bodyBase64, "base64"));
 }
 
-function flattenHeaders(
+/**
+ * Snapshot the upstream response headers into the cache. Array-valued headers
+ * (notably `set-cookie`, which Node's http module collects into a string[]) are
+ * PRESERVED as arrays — `res.setHeader` / `res.writeHead` emit one header line
+ * per array element, so a replayed duplicate carries the same multi-valued
+ * headers as the original forward. Collapsing arrays into a comma-joined string
+ * (the v0.5.0 behaviour) mangled multi-cookie responses on the replay path:
+ * per RFC 6265 a comma-joined Set-Cookie cannot be reliably split because
+ * cookie values may contain commas (e.g. `Expires=Wed, 09-Jun-2021 ...`).
+ */
+function snapshotHeaders(
   headers: http.IncomingHttpHeaders,
-): Record<string, string> {
-  const out: Record<string, string> = {};
+): Record<string, string | string[]> {
+  const out: Record<string, string | string[]> = {};
   for (const [k, v] of Object.entries(headers)) {
     if (v === undefined) continue;
-    out[k] = Array.isArray(v) ? v.join(", ") : v;
+    out[k] = v;
   }
   return out;
 }

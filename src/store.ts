@@ -35,7 +35,16 @@ export interface StepRecord {
 
 export interface CachedResponse {
   status: number;
-  headers: Record<string, string>;
+  /**
+   * Response headers to replay on a suppressed duplicate. Values may be arrays
+   * for headers permitted multiple values (notably `set-cookie`): Node's http
+   * module collects those into a string[], and collapsing them into one joined
+   * string would mangle multi-cookie responses on the replay path (per RFC 6265
+   * a comma-joined Set-Cookie cannot be reliably split because cookie values
+   * may contain commas). The proxy's `res.setHeader` / `res.writeHead` emit
+   * one header line per array element, so the array is preserved end-to-end.
+   */
+  headers: Record<string, string | string[]>;
   /** Base64-encoded body so binary responses survive JSON-file persistence. */
   bodyBase64: string;
 }
@@ -76,6 +85,19 @@ export class IdemStore {
    * loaded or the file was valid.
    */
   loadError?: Error;
+  /**
+   * Set when {@link persist} could not write the store file (EACCES on a
+   * read-only/unwritable store dir, ENOSPC on a full disk, ENOENT on a
+   * misconfigured/missing --store path). The in-memory Map remains the source
+   * of truth and lookups/commits keep working — fail-soft, not fail-hard — so
+   * a durable-write failure never surfaces as a system-error rejection through
+   * `idemStep` (whose `commit` lives inside the try and would otherwise re-throw
+   * a disk error instead of resolving with fn's result). The hosted / proxy CLI
+   * surfaces this on the first occurrence so an operator learns dedup state is
+   * not being durably recorded. `undefined` once a subsequent persist succeeds
+   * (the transient disk issue cleared).
+   */
+  persistError?: Error;
 
   constructor(options: IdemStoreOptions = {}) {
     this.filePath = options.filePath;
@@ -320,8 +342,27 @@ export class IdemStore {
     // `persist()` runs synchronously on every mutation, so the crash window is
     // non-trivial over a long session (notably the hosted proxy's durable path).
     const tmp = `${this.filePath}.tmp`;
-    writeFileSync(tmp, data, "utf8");
-    renameSync(tmp, this.filePath);
+    try {
+      writeFileSync(tmp, data, "utf8");
+      renameSync(tmp, this.filePath);
+      // A successful persist clears any prior transient error (the disk issue
+      // cleared, e.g. after an operator fixed the --store dir perms).
+      if (this.persistError) this.persistError = undefined;
+    } catch (err) {
+      // Fail-soft, not fail-hard: a disk error (EACCES / ENOSPC / ENOENT on a
+      // read-only, full, or missing store dir) must NOT surface as a system-
+      // error rejection through idemStep (commit() lives inside the wrapper's
+      // try, so an uncaught throw here would be re-thrown by the catch and
+      // make idemStep reject with EACCES instead of resolving with fn's result,
+      // abandoning the still-correct in-memory record via the catch's
+      // store.delete). The in-memory Map is the source of truth; keep serving
+      // exactly-once decisions off it and surface the durable-write failure via
+      // persistError so the hosted/proxy CLI can warn. A half-written .tmp (if
+      // writeFileSync threw mid-write) is left in place — the next persist
+      // overwrites it, and the atomic-rename guarantee means the real target is
+      // never touched by a failed write (only renameSync mutates the target).
+      this.persistError = err instanceof Error ? err : new Error(String(err));
+    }
   }
 
   private load(): void {
