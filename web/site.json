@@ -1,0 +1,112 @@
+{
+  "schema": 1,
+  "name": "idemstep",
+  "github": "https://github.com/SuperMarioYL/idemstep",
+  "host": "idemstep.lei6393.com",
+  "lang": { "primary": "zh", "toggle": true },
+  "accent": ["#7C5CFF", "#6342F5", "#4A2EE6"],
+  "hero": {
+    "eyebrow": {
+      "zh": "重试 · 恰好一次 · 浏览器 Agent",
+      "en": "Retries · Exactly-once · Browser agents"
+    },
+    "headline": {
+      "zh": "Agent 重试点了一次下单\n而不是两次",
+      "en": "Your agent retries the order once\nnot twice"
+    },
+    "sub": {
+      "zh": "给浏览器 Agent 的每一步套上客户端生成的幂等键——自愈重试在请求出去之前就被去重，慢但成功的提交不会再下一次单。",
+      "en": "Wrap each browser-agent step with a client-generated idempotency key so a self-healing retry is deduplicated before the request ever leaves — a slow-but-successful submit no longer places the order twice."
+    },
+    "command": "npx idemstep proxy",
+    "cta": { "zh": "开始用", "en": "Get started" },
+    "ctaGithub": { "zh": "GitHub", "en": "GitHub" },
+    "scroll": { "zh": "往下看", "en": "Scroll" }
+  },
+  "advantages": [
+    {
+      "title": {
+        "zh": "慢提交 + 自愈重试 = 一次，不是两次",
+        "en": "Slow submit + self-healing retry = once, not twice"
+      },
+      "body": {
+        "zh": "浏览器 Agent 的自愈层会在“看起来失败”时重驱点击。可一次发生在成功提交之后的重试没有幂等概念，于是订单被下了两遍。给那一步套上客户端生成的键，重试在网络边界直接变成无操作。",
+        "en": "A browser agent's self-healing layer re-drives any click that looks failed. But a retry fired after a slow-but-successful submit has no notion of idempotency, so the order is placed twice. Wrap that step with a client-generated key and the retry becomes a no-op at the network boundary."
+      },
+      "chips": [
+        "› 同一键重放，不重跑",
+        "› 提交一次=下单一次",
+        "› 重试被抑制时对账单可见"
+      ]
+    },
+    {
+      "title": {
+        "zh": "真 HTTPS 结账页也能去重",
+        "en": "Dedup works against real HTTPS checkout pages"
+      },
+      "body": {
+        "zh": "浏览器把真实结账流量走 HTTPS 隧道。IdemStep 用本地可信的中间人终止隧道、解密流量，对它跑同一套去重逻辑——不只是明文测试页面。",
+        "en": "A browser sends real checkout traffic over an HTTPS tunnel. IdemStep terminates the tunnel with a locally-trusted cert, decrypts the traffic, and runs the same dedup over it — not just plaintext test pages."
+      },
+      "chips": [
+        "› 真站点，非 mock",
+        "› 本地可信 CA",
+        "› 一行配进 Playwright"
+      ]
+    },
+    {
+      "title": {
+        "zh": "不想自己运维代理？用托管版",
+        "en": "Don't want to run the proxy? Use the hosted one"
+      },
+      "body": {
+        "zh": "跨站拦截层自己可靠地跑起来很难。把远端 Playwright 指向托管端点，多个操作者共用一个 URL、彼此命名空间隔离，享受托管的“恰好一次”——单操作者鉴权与路由已就绪。",
+        "en": "The cross-site interception layer is genuinely hard to self-host reliably. Point a remote Playwright context at the hosted endpoint; multiple operators share one URL in isolated namespaces for managed exactly-once — single-operator auth and routing are ready today."
+      },
+      "chips": [
+        "› 多操作者按 key 隔离",
+        "› 托管 = 免运维",
+        "› 失败软，不静默"
+      ]
+    },
+    {
+      "title": {
+        "zh": "崩溃重启不丢已下单的键",
+        "en": "A crash and restart doesn't lose the keys you already placed"
+      },
+      "body": {
+        "zh": "幂等状态原子写盘，重启后还在；写盘遇到磁盘问题时改为软失败，继续在内存里做对的决定，而不是把系统错误抛给 Agent。长时间跑的托管代理还会自动清扫过期键。",
+        "en": "Idempotency state is written atomically so it survives a restart. A disk error fails soft — the in-memory store keeps making the right call instead of surfacing a system error to the agent. A long-running hosted proxy even sweeps its own expired keys."
+      },
+      "chips": [
+        "› 原子写盘",
+        "› 磁盘错软失败",
+        "› 过期键自动清扫"
+      ]
+    }
+  ],
+  "scene": {
+    "kind": "hub-nodes",
+    "nodes": ["Playwright Agent", "Local Proxy", "IdemStore", "Hosted Proxy", "Checkout Site"]
+  },
+  "cta": {
+    "headline": {
+      "zh": "让你的 Agent 重试时不再多扣一次",
+      "en": "Stop your agent from charging twice on a retry"
+    },
+    "sub": {
+      "zh": "三步：装包、起代理、把那一步包进 idemStep()。",
+      "en": "Three steps: install, start the proxy, wrap the step in idemStep()."
+    },
+    "button": {
+      "zh": "看 10 秒演示",
+      "en": "Watch the 10s demo"
+    }
+  },
+  "footer": {
+    "tag": {
+      "zh": "浏览器 Agent 重试的幂等键层 · 开源 Apache-2.0",
+      "en": "The idempotency-key layer for browser-agent retries · open source Apache-2.0"
+    }
+  }
+}
