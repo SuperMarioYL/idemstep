@@ -3,8 +3,15 @@
   "name": "idemstep",
   "github": "https://github.com/SuperMarioYL/idemstep",
   "host": "idemstep.lei6393.com",
-  "lang": { "primary": "zh", "toggle": true },
-  "accent": ["#7C5CFF", "#6342F5", "#4A2EE6"],
+  "lang": {
+    "primary": "zh",
+    "toggle": true
+  },
+  "accent": [
+    "#7C5CFF",
+    "#6342F5",
+    "#4A2EE6"
+  ],
   "hero": {
     "eyebrow": {
       "zh": "重试 · 恰好一次 · 浏览器 Agent",
@@ -19,9 +26,18 @@
       "en": "Wrap each browser-agent step with a client-generated idempotency key so a self-healing retry is deduplicated before the request ever leaves — a slow-but-successful submit no longer places the order twice."
     },
     "command": "npx idemstep proxy",
-    "cta": { "zh": "开始用", "en": "Get started" },
-    "ctaGithub": { "zh": "GitHub", "en": "GitHub" },
-    "scroll": { "zh": "往下看", "en": "Scroll" }
+    "cta": {
+      "zh": "开始用",
+      "en": "Get started"
+    },
+    "ctaGithub": {
+      "zh": "GitHub",
+      "en": "GitHub"
+    },
+    "scroll": {
+      "zh": "往下看",
+      "en": "Scroll"
+    }
   },
   "advantages": [
     {
@@ -30,12 +46,12 @@
         "en": "Slow submit + self-healing retry = once, not twice"
       },
       "body": {
-        "zh": "浏览器 Agent 的自愈层会在“看起来失败”时重驱点击。可一次发生在成功提交之后的重试没有幂等概念，于是订单被下了两遍。给那一步套上客户端生成的键，重试在网络边界直接变成无操作。",
-        "en": "A browser agent's self-healing layer re-drives any click that looks failed. But a retry fired after a slow-but-successful submit has no notion of idempotency, so the order is placed twice. Wrap that step with a client-generated key and the retry becomes a no-op at the network boundary."
+        "zh": "给浏览器 Agent 的每一步套上客户端生成的幂等键——自愈重试在请求出去之前就被去重，慢但成功的提交不会再下一次单。哪怕后端收了连接就卡死不回，也不会把键卡成永远过不去的毒占位：超时一到就走失败路径放掉键，下一次重试直接重新发，不会粘在卡死的转发上。",
+        "en": "Give your browser Agent's every step a client-generated idempotency key — self-healing retries are deduped BEFORE the request goes out, so a slow-but-successful submit never re-charges. Even a backend that accepts the connection then goes silent can't poison the key: on timeout it takes the failure path and releases the key, so the next retry forwards fresh instead of coalescing onto a hung forward."
       },
       "chips": [
         "› 同一键重放，不重跑",
-        "› 提交一次=下单一次",
+        "› 后端卡死不毒占位",
         "› 重试被抑制时对账单可见"
       ]
     },
@@ -75,19 +91,25 @@
         "en": "A crash and restart doesn't lose the keys you already placed"
       },
       "body": {
-        "zh": "幂等状态原子写盘，重启后还在；写盘遇到磁盘问题时改为软失败，继续在内存里做对的决定，而不是把系统错误抛给 Agent。长时间跑的托管代理还会自动清扫过期键。",
-        "en": "Idempotency state is written atomically so it survives a restart. A disk error fails soft — the in-memory store keeps making the right call instead of surfacing a system error to the agent. A long-running hosted proxy even sweeps its own expired keys."
+        "zh": "给浏览器 Agent 的每一步套上客户端生成的幂等键——自愈重试在请求出去之前就被去重，慢但成功的提交不会再下一次单。键状态原子写盘，崩溃重启不丢已下单的键；哪怕缓存记录被改坏或写了一半，加载时会自愈修掉再走新一次，而不是 replay 时崩。",
+        "en": "Idempotency-key state is atomically persisted, so a crash-restart never loses an already-placed key. Even a cached response record that got hand-edited or half-written self-heals on load — the bad cache is cleared and the next retry forwards fresh, instead of crashing replay."
       },
       "chips": [
         "› 原子写盘",
-        "› 磁盘错软失败",
+        "› 坏缓存自愈不崩",
         "› 过期键自动清扫"
       ]
     }
   ],
   "scene": {
     "kind": "hub-nodes",
-    "nodes": ["Playwright Agent", "Local Proxy", "IdemStore", "Hosted Proxy", "Checkout Site"]
+    "nodes": [
+      "Playwright Agent",
+      "Local Proxy",
+      "IdemStore",
+      "Hosted Proxy",
+      "Checkout Site"
+    ]
   },
   "cta": {
     "headline": {
@@ -108,5 +130,6 @@
       "zh": "浏览器 Agent 重试的幂等键层 · 开源 Apache-2.0",
       "en": "The idempotency-key layer for browser-agent retries · open source Apache-2.0"
     }
-  }
+  },
+  "content_version": "v0.7.0"
 }
