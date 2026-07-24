@@ -49,6 +49,15 @@ export interface ConnectTunnelOptions {
    * upstreams (tests/dev). Public https sites need neither.
    */
   upstreamTls?: { ca?: string | string[] | Buffer | Buffer[]; rejectUnauthorized?: boolean };
+  /**
+   * Upstream forward idle timeout in milliseconds, mirroring
+   * {@link ProxyOptions.upstreamTimeoutMs}. Bounds the CONNECT-tunnel forward
+   * so a stalled https backend (accepts the TLS connection then never responds)
+   * cannot hang the tunnel client, leak a poison-pending record, and coalesce a
+   * same-key retry onto a hung forward over TLS. Defaults to 30000ms when
+   * omitted (the proxy always passes a concrete value).
+   */
+  upstreamTimeoutMs?: number;
   /** Logger; a no-op when omitted. */
   log?: (line: string) => void;
   /** Called when a duplicate is suppressed, so the proxy can count it. */
@@ -203,7 +212,7 @@ function tunnelHandler(
 
       // Non-transactional traffic (no idempotency key) tunnels through untouched.
       if (!idemKey) {
-        forwardHttps(host, port, req, rawBody, res, null, store, log, upstreamTls).catch(() => {});
+        forwardHttps(host, port, req, rawBody, res, null, store, log, upstreamTls, options.upstreamTimeoutMs).catch(() => {});
         return;
       }
 
@@ -254,7 +263,7 @@ function tunnelHandler(
       store.begin(idemKey, headerValue(req.headers["x-idem-label"]) ?? "step");
       store.setRequestSig(idemKey, sig);
       log(`tunnel forwarding key=${idemKey} sig=${sig.slice(0, 12)} -> ${target}`);
-      const settled = forwardHttps(host, port, req, rawBody, res, { idemKey, sig }, store, log, upstreamTls);
+      const settled = forwardHttps(host, port, req, rawBody, res, { idemKey, sig }, store, log, upstreamTls, options.upstreamTimeoutMs);
       state.inflight.set(idemKey, settled);
       // Swallow the rejection: the upstream-error / response-stream-error path
       // already wrote the 502 to `res` and released the pending record. Without
@@ -288,6 +297,7 @@ function forwardHttps(
   store: IdemStore,
   log: (line: string) => void,
   upstreamTls: ConnectTunnelOptions["upstreamTls"],
+  upstreamTimeoutMs?: number,
 ): Promise<CachedResponse> {
   return new Promise<CachedResponse>((resolve, reject) => {
     const url = new URL(`https://${host}:${port}${req.url ?? "/"}`);
@@ -359,6 +369,22 @@ function forwardHttps(
     );
 
     upstream.on("error", (err) => fail(err, "request"));
+
+    // Bound the upstream forward with an idle timeout so a stalled https backend
+    // (accepts the TLS connection then never responds) cannot hang the tunnel
+    // client, leak an un-expirable poison-pending record, and coalesce a
+    // same-key retry onto a never-settling promise — the TLS analogue of the
+    // plaintext proxy's forward() timeout. Routes through the EXISTING `fail()`
+    // path (store.delete + 502 + reject) and destroys the upstream socket; the
+    // `settled` flag makes the callback a no-op if the response already settled.
+    const timeoutMs = upstreamTimeoutMs ?? 30000;
+    if (timeoutMs > 0) {
+      upstream.setTimeout(timeoutMs, () => {
+        if (settled) return;
+        fail(new Error(`upstream timeout after ${timeoutMs}ms`), "request");
+        upstream.destroy();
+      });
+    }
 
     if (body.length) upstream.write(body);
     upstream.end();

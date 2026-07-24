@@ -56,6 +56,13 @@ interface ParsedArgs {
   apiKeys?: string;
   /** `--prune-interval` value in ms: how often to sweep TTL-expired keys. */
   pruneIntervalMs?: number;
+  /**
+   * `--upstream-timeout` value in ms: idle timeout bounding every upstream
+   * forward so a stalled backend (accepts the connection then goes silent)
+   * cannot hang the client, leak a poison-pending record, and coalesce a
+   * same-key retry onto a never-settling forward. Defaults to 30000ms.
+   */
+  upstreamTimeoutMs?: number;
 }
 
 function parseArgs(argv: string[]): ParsedArgs {
@@ -70,6 +77,7 @@ function parseArgs(argv: string[]): ParsedArgs {
     else if (arg === "--https") out.https = true;
     else if (arg === "--api-keys") out.apiKeys = argv[++i];
     else if (arg === "--prune-interval") out.pruneIntervalMs = Number(argv[++i]);
+    else if (arg === "--upstream-timeout") out.upstreamTimeoutMs = Number(argv[++i]);
     else if (!arg.startsWith("-") && out.command === undefined) out.command = arg;
   }
   return out;
@@ -111,6 +119,15 @@ Options:
                     long-running proxy reclaims memory (default: never; lookups
                     expire keys lazily but never-again-looked-up keys linger
                     without this). No effect when no --ttl is set.
+      --upstream-timeout MS  (proxy/hosted) Idle timeout bounding every upstream
+                    forward so a stalled backend — one that accepts the
+                    connection then goes silent (never responds/errors/ends/
+                    aborts) — cannot hang the client, leak an un-expirable
+                    poison-pending record, and coalesce a same-key retry onto a
+                    never-settling forward (permanently breaking once-only
+                    recovery for that key). On expiry the proxy 502s, releases
+                    the pending record, and a retry forwards fresh. Default
+                    30000ms; set 0 to disable.
       --https       Intercept HTTPS via a CONNECT+MITM tunnel so dedup works
                     against real https sites (requires openssl; prints the CA
                     cert to trust in the client).
@@ -179,6 +196,17 @@ function warnIfStoreErrors(store: IdemStore, label: string): void {
       `idemstep ${label}: WARNING — durable write failed: ${store.persistError.message} (dedup decisions continue in-memory; fix the --store path to resume durability)\n`,
     );
   }
+  // repairedCachedResponseKeys lists committed records whose persisted
+  // cachedResponse was malformed (missing bodyBase64 / status / headers) and
+  // was cleared on load so a same-key retry forwards fresh instead of crashing
+  // replay() with a TypeError out of Buffer.from(undefined, "base64"). Surface
+  // the repair so an operator learns a half-written/hand-edited record was
+  // healed — fail-loud, not fail-open.
+  if (store.repairedCachedResponseKeys.length > 0) {
+    process.stderr.write(
+      `idemstep ${label}: WARNING — repaired ${store.repairedCachedResponseKeys.length} malformed cachedResponse field(s) (cleared so a same-key retry forwards fresh and repopulates): ${store.repairedCachedResponseKeys.join(", ")}\n`,
+    );
+  }
 }
 
 /**
@@ -224,6 +252,7 @@ async function main(): Promise<void> {
       host: args.host,
       store,
       https: args.https,
+      upstreamTimeoutMs: args.upstreamTimeoutMs,
     });
     process.stdout.write(
       `idemstep proxy ready on http://localhost:${proxy.port}\n` +
@@ -291,6 +320,7 @@ async function main(): Promise<void> {
       store,
       https: args.https,
       authorizeKey,
+      upstreamTimeoutMs: args.upstreamTimeoutMs,
     });
     const displayHost = host === "0.0.0.0" ? "<this-host>" : host;
     if (multiTenant) {

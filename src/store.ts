@@ -98,6 +98,20 @@ export class IdemStore {
    * (the transient disk issue cleared).
    */
   persistError?: Error;
+  /**
+   * Keys whose persisted `cachedResponse` was malformed on load (missing
+   * `bodyBase64`, `status`, or `headers` — e.g. a hand-edited or half-written
+   * store file) and was REPAIRED by clearing the field so a same-key retry
+   * forwards fresh instead of crashing `replay()` with a `TypeError` out of
+   * `Buffer.from(undefined, "base64")`. The record itself is kept (it remains
+   * committed), so the proxy's dedup check (`existing.status === "committed"
+   * && existing.cachedResponse`) falls through to forward fresh and
+   * `setCachedResponse` repopulates a valid shape. Surfaced via the hosted /
+   * proxy CLI's `warnIfStoreErrors` so an operator learns a half-written
+   * record was repaired — fail-loud, not fail-open. Empty when no repair was
+   * needed.
+   */
+  repairedCachedResponseKeys: string[] = [];
 
   constructor(options: IdemStoreOptions = {}) {
     this.filePath = options.filePath;
@@ -400,8 +414,9 @@ export class IdemStore {
    * Validate one element parsed from the JSON-file store. `JSON.parse` only
    * guarantees the file is syntactically valid JSON, not that each element is a
    * well-formed {@link StepRecord} — a hand-edited or half-written file can hold
-   * elements missing `key`, with a bogus `status`, or persisted as `pending`.
-   * Returns a clean record, or `undefined` for anything that must be dropped:
+   * elements missing `key`, with a bogus `status`, persisted as `pending`, or
+   * carrying a malformed `cachedResponse` (e.g. missing `bodyBase64`). Returns
+   * a clean record, or `undefined` for anything that must be dropped:
    *
    *   - a non-object, or one without a non-empty string `key` (which would
    *     otherwise be keyed under `undefined` and shadow real lookups);
@@ -409,6 +424,17 @@ export class IdemStore {
    *   - a `pending` record — an in-flight action cannot meaningfully survive a
    *     process restart, and (because TTL/prune only sweep committed records) a
    *     persisted `pending` would otherwise live forever as an un-expirable key.
+   *
+   * A committed record whose `cachedResponse` is present but malformed (missing
+   * `bodyBase64` string, `status` number, or `headers` object) is KEPT with the
+   * `cachedResponse` field CLEARED (and the key audited in
+   * {@link repairedCachedResponseKeys}). The record stays committed, so the
+   * proxy's dedup check (`existing.status === "committed" && existing.cachedResponse`)
+   * falls through to forward fresh; `setCachedResponse` then repopulates a valid
+   * shape and `commit` no-ops. Without this repair a malformed `cachedResponse`
+   * would survive load (committed records are not dropped) and the first same-key
+   * retry would crash `replay()` with a `TypeError` out of
+   * `Buffer.from(undefined, "base64")`.
    */
   private sanitizeLoadedRecord(candidate: unknown): StepRecord | undefined {
     if (typeof candidate !== "object" || candidate === null) return undefined;
@@ -419,16 +445,50 @@ export class IdemStore {
     if (rec.status === "pending") return undefined;
     const createdAt =
       typeof rec.createdAt === "number" ? rec.createdAt : Date.now();
+    // Validate cachedResponse if present: a hand-edited or half-written file can
+    // hold a malformed shape (notably missing `bodyBase64`) that survives load
+    // (committed records are not dropped) and would crash replay() with a
+    // TypeError out of Buffer.from(undefined, "base64") on the first same-key
+    // retry. Repair by CLEARING the field — the record stays committed, so the
+    // proxy's dedup check requires existing.cachedResponse truthy and falls
+    // through to forward fresh; setCachedResponse repopulates a valid shape and
+    // commit no-ops. Audit the repair so an operator learns a half-written
+    // record was repaired (fail-loud, not fail-open).
+    let cachedResponse = rec.cachedResponse;
+    if (cachedResponse !== undefined && !isValidCachedResponse(cachedResponse)) {
+      this.repairedCachedResponseKeys.push(rec.key);
+      cachedResponse = undefined;
+    }
     return {
       key: rec.key,
       label: typeof rec.label === "string" ? rec.label : "step",
       status: "committed",
       result: rec.result,
       requestSig: typeof rec.requestSig === "string" ? rec.requestSig : undefined,
-      cachedResponse: rec.cachedResponse,
+      cachedResponse,
       createdAt,
       committedAt:
         typeof rec.committedAt === "number" ? rec.committedAt : createdAt,
     };
   }
+}
+
+/**
+ * Validate the shape of a persisted {@link CachedResponse}. `JSON.parse` only
+ * guarantees syntactic validity — a hand-edited or half-written store file can
+ * hold a `cachedResponse` missing `bodyBase64` (the base64 body), `status` (the
+ * HTTP status number), or `headers` (the header record). All three are required
+ * by `replay()` (`Buffer.from(cached.bodyBase64, "base64")`, `cached.status`,
+ * `Object.entries(cached.headers)`); a missing `bodyBase64` crashes with a
+ * `TypeError` out of `Buffer.from(undefined, "base64")`.
+ */
+function isValidCachedResponse(c: unknown): c is CachedResponse {
+  if (typeof c !== "object" || c === null) return false;
+  const r = c as Partial<CachedResponse>;
+  return (
+    typeof r.bodyBase64 === "string" &&
+    typeof r.status === "number" &&
+    typeof r.headers === "object" &&
+    r.headers !== null
+  );
 }

@@ -88,6 +88,21 @@ export interface ProxyOptions {
    * `idemstep proxy` and for `hosted` without `--api-keys`.
    */
   authorizeKey?: AuthorizeKey;
+  /**
+   * Upstream forward idle timeout in milliseconds. A stalled backend that
+   * accepts the connection then goes silent (never responds/errors/ends/aborts)
+   * falls through every existing guard — those only fire on `error`/`aborted` —
+   * so without a timeout the forward promise never settles, the client hangs,
+   * the pending record leaks as un-expirable poison-pending (`isExpired`
+   * returns false for non-committed records), and a same-key retry coalesces
+   * onto the hung forward and also hangs — permanently breaking once-only
+   * recovery for that key. The timeout bounds the forward: on expiry it routes
+   * through the existing `fail()` path (`store.delete(commit.idemKey)` + 502 +
+   * reject) and destroys the upstream socket, so the pending record is released
+   * and a same-key retry forwards fresh instead of coalescing onto a hung
+   * promise. Defaults to 30000ms; CLI `--upstream-timeout MS` overrides.
+   */
+  upstreamTimeoutMs?: number;
 }
 
 export interface RunningProxy {
@@ -126,6 +141,11 @@ export function startProxy(options: ProxyOptions = {}): Promise<RunningProxy> {
     options.log === false
       ? () => {}
       : options.log ?? ((line: string) => console.log(`[idemstep] ${line}`));
+  // Bound every upstream forward with an idle timeout so a stalled backend
+  // (accepts the connection then goes silent) cannot hang the client, leak an
+  // un-expirable poison-pending record, and coalesce a same-key retry onto a
+  // never-settling promise. See ProxyOptions.upstreamTimeoutMs.
+  const upstreamTimeoutMs = options.upstreamTimeoutMs ?? 30000;
 
   let suppressed = 0;
   // In-flight forwards keyed by idemKey. While the first request for a key is
@@ -160,7 +180,7 @@ export function startProxy(options: ProxyOptions = {}): Promise<RunningProxy> {
 
     // Non-transactional traffic (no idempotency key) is forwarded untouched.
     if (!idemKey) {
-      forward(target, req, rawBody, res, null, store, log);
+      forward(target, req, rawBody, res, null, store, log, upstreamTimeoutMs);
       return;
     }
 
@@ -232,7 +252,7 @@ export function startProxy(options: ProxyOptions = {}): Promise<RunningProxy> {
     store.begin(idemKey, labelFor(req) ?? "step");
     store.setRequestSig(idemKey, sig);
     log(`forwarding "${idemKey}" sig=${sig.slice(0, 12)} -> ${target}`);
-    const settled = forward(target, req, rawBody, res, { idemKey, sig }, store, log);
+    const settled = forward(target, req, rawBody, res, { idemKey, sig }, store, log, upstreamTimeoutMs);
     inflightForwards.set(idemKey, settled);
     // Swallow the rejection here so it never surfaces as an unhandled rejection:
     // the upstream-error path already wrote the 502 to `res` and released the
@@ -261,6 +281,7 @@ export function startProxy(options: ProxyOptions = {}): Promise<RunningProxy> {
           store,
           ca,
           upstreamTls: options.upstreamTls,
+          upstreamTimeoutMs,
           log: options.log === false ? () => {} : log,
           onSuppressed: () => {
             suppressed += 1;
@@ -364,6 +385,7 @@ function forward(
   commit: CommitContext | null,
   store: IdemStore,
   log: (line: string) => void,
+  upstreamTimeoutMs: number,
 ): Promise<CachedResponse> {
   return new Promise<CachedResponse>((resolve, reject) => {
     const url = new URL(target);
@@ -440,6 +462,25 @@ function forward(
     );
 
     upstream.on("error", (err) => fail(err, "request"));
+
+    // Bound the upstream forward with an idle timeout so a stalled backend
+    // (accepts the connection then never responds/errors/ends/aborts) cannot
+    // hang the client, leak an un-expirable poison-pending record, and coalesce
+    // a same-key retry onto a never-settling promise (permanently breaking
+    // once-only recovery for that key). `setTimeout` on a ClientRequest sets an
+    // inactivity timeout on the underlying socket once it is assigned; on expiry
+    // route through the EXISTING `fail()` path (store.delete + 502 + reject) and
+    // destroy the upstream socket so the connection is reclaimed. The `settled`
+    // flag makes the callback a no-op if the response already settled (e.g. the
+    // response-stream "aborted" handler fired first on a truncated response, or
+    // the response "end" handler completed normally).
+    if (upstreamTimeoutMs > 0) {
+      upstream.setTimeout(upstreamTimeoutMs, () => {
+        if (settled) return;
+        fail(new Error(`upstream timeout after ${upstreamTimeoutMs}ms`), "request");
+        upstream.destroy();
+      });
+    }
 
     if (body.length) upstream.write(body);
     upstream.end();

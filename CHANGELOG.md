@@ -4,6 +4,56 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - 2026-07-25
+
+Reliability-continuation release. Closes two adversarial exactly-once defects:
+a stalled-upstream hang that poisoned the pending record and permanently broke
+once-only recovery for that key, and an unvalidated `cachedResponse` on load
+that crashed `replay()` on the first same-key retry after a hand-edited /
+half-written store file.
+
+### Added
+
+- **Upstream forward idle timeout — `--upstream-timeout MS` (proxy/hosted) and
+  `startProxy({ upstreamTimeoutMs })`.** There was NO timeout on the forward in
+  `proxy.ts` (`forward`) or `connect.ts` (`forwardHttps`). A stalled backend —
+  one that accepts the connection then goes silent (never responds/errors/ends/
+  aborts) — fell through every existing guard (those only fire on
+  `error`/`aborted`), so the forward promise never settled, the client hung,
+  the pending record leaked as un-expirable poison-pending (`store.isExpired`
+  returns false for non-committed records), and a same-key retry coalesced onto
+  the hung forward and also hung — permanently breaking once-only recovery for
+  that key. The forward now bounds the upstream with an idle timeout
+  (`ClientRequest.setTimeout`); on expiry it routes through the EXISTING `fail()`
+  path (`store.delete(commit.idemKey)` + 502 + reject) and destroys the upstream
+  socket, so the pending record is released and a same-key retry forwards fresh
+  instead of coalescing. The `settled` flag makes the timeout callback a no-op if
+  the response already settled (e.g. the response-stream `"aborted"` handler
+  fired first on a truncated response, or `"end"` completed normally). Defaults
+  to 30000ms; `--upstream-timeout 0` disables. Wired into both the plaintext
+  proxy and the CONNECT-tunnel paths.
+
+### Fixed
+
+- **A malformed `cachedResponse` on load crashed `replay()` on the first
+  same-key retry.** `sanitizeLoadedRecord` checked `key`/`status`/`createdAt`/
+  `label`/`requestSig` but passed `cachedResponse` through UNVALIDATED — despite
+  its docstring promising to defend against hand-edited/half-written files. A
+  committed record with a malformed `cachedResponse` (e.g. missing
+  `bodyBase64`) survived load (`isCommitted` true) and on the first same-key
+  retry crashed `replay()` with a `TypeError` out of
+  `Buffer.from(undefined, "base64")` (proxy.ts / connect.ts). The validator now
+  requires `bodyBase64` (string), `status` (number), and `headers` (object)
+  when `cachedResponse` is present; if malformed, the field is CLEARED (the
+  record stays committed, so the proxy's dedup check
+  (`existing.status === "committed" && existing.cachedResponse`) falls through
+  to forward fresh; `setCachedResponse` repopulates a valid shape and `commit`
+  no-ops) and the repair is audited via a new public
+  `store.repairedCachedResponseKeys` field surfaced by the hosted/proxy CLI's
+  `warnIfStoreErrors` — fail-loud, not fail-open.
+
+[0.7.0]: https://github.com/SuperMarioYL/idemstep/releases/tag/v0.7.0
+
 ## [0.6.0] - 2026-07-21
 
 Reliability-and-ops-continuation release. Closes the write-side gap the v0.5.0
