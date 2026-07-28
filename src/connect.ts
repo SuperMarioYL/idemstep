@@ -149,6 +149,26 @@ export function attachConnectTunnel(
     clientSocket: net.Socket,
     head: Buffer,
   ): void => {
+    // v0.8.0: when multi-tenant auth is configured, authenticate the CONNECT
+    // request ITSELF — not only the inner transactional request. Pre-fix
+    // onConnect wrote "200 Connection Established" for any caller, so the
+    // multi-tenant hosted proxy (bound 0.0.0.0) was an open relay: an
+    // unauthenticated remote client could CONNECT to arbitrary host:port
+    // (SMTP relay / internal SSH / anonymizing proxy) and the per-operator
+    // auth+namespacing --api-keys advertises was bypassable. The authorizer
+    // reads x-idem-api-key OR Proxy-Authorization (Basic, which Playwright
+    // sends via proxy.username/password); a missing/unknown key is rejected
+    // 407. Calling it with a sentinel empty idemKey discards the (unused)
+    // namespace and keeps only the null/non-null validity check. Single-tenant
+    // mode (no authorizeKey) is unchanged.
+    if (options.authorizeKey && options.authorizeKey(req, "") === null) {
+      clientSocket.end(
+        'HTTP/1.1 407 Proxy Authentication Required\r\n' +
+          'Proxy-Authenticate: Basic realm="idemstep"\r\n\r\n',
+      );
+      return;
+    }
+
     const [host, portStr] = (req.url ?? "").split(":");
     const port = Number(portStr) || 443;
     if (!host) {
@@ -210,8 +230,22 @@ function tunnelHandler(
       let idemKey = headerValue(req.headers[IDEM_KEY_HEADER]);
       const target = `https://${host}:${port}${req.url ?? "/"}`;
 
-      // Non-transactional traffic (no idempotency key) tunnels through untouched.
+      // Non-transactional traffic (no idempotency key) tunnels through
+      // untouched — EXCEPT in multi-tenant mode, where it must carry a valid
+      // API key too. Pre-fix this path forwarded untouched, so omitting
+      // x-idem-key bypassed the per-operator auth entirely (open relay). v0.8.0
+      // requires the key here as well (401 on a missing/unknown key); the
+      // authorizer accepts x-idem-api-key OR Proxy-Authorization. Single-tenant
+      // mode (no authorizeKey) is unchanged.
       if (!idemKey) {
+        if (options.authorizeKey && options.authorizeKey(req, "") === null) {
+          if (!res.headersSent) {
+            res.writeHead(401).end(
+              "idemstep tunnel: unauthorized (valid x-idem-api-key required for non-transactional traffic)",
+            );
+          }
+          return;
+        }
         forwardHttps(host, port, req, rawBody, res, null, store, log, upstreamTls, options.upstreamTimeoutMs).catch(() => {});
         return;
       }

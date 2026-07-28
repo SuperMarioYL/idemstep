@@ -61,6 +61,22 @@ export interface IdemStoreOptions {
    * action always settles first.
    */
   ttlMs?: number;
+  /**
+   * Fail-loud sink invoked the FIRST time a durable-store error surfaces —
+   * both at load (a {@link IdemStore.loadError} or a repaired
+   * `cachedResponse`) and, critically, mid-session when a {@link IdemStore.persist}
+   * first fails (EACCES / ENOSPC / ENOENT during operation). The message is the
+   * human-facing body (already prefixed `WARNING — …`); the caller stamps the
+   * `idemstep <label>:` prefix and a newline. Without this the v0.6.0
+   * "fail-loud" promise was unfulfilled for a RUNNING proxy: persistError was
+   * checked once at startup (before any mutation, always undefined) and never
+   * re-checked, so a failing disk silently dropped persists and the next
+   * restart loaded a stale file — a same-key retry was forwarded as a NEW
+   * action (double-submit) with zero operator visibility. Omit for a silent
+   * store (e.g. tests that assert the {@link IdemStore.persistError} field
+   * directly).
+   */
+  onError?: (message: string) => void;
 }
 
 /**
@@ -113,9 +129,16 @@ export class IdemStore {
    */
   repairedCachedResponseKeys: string[] = [];
 
+  /**
+   * Fail-loud sink wired via {@link IdemStoreOptions.onError}. Set BEFORE
+   * {@link load} runs in the constructor so load-time errors surface too.
+   */
+  private readonly onError?: (message: string) => void;
+
   constructor(options: IdemStoreOptions = {}) {
     this.filePath = options.filePath;
     this.ttlMs = options.ttlMs && options.ttlMs > 0 ? options.ttlMs : 0;
+    this.onError = options.onError;
     if (this.filePath && existsSync(this.filePath)) {
       this.load();
     }
@@ -375,7 +398,23 @@ export class IdemStore {
       // writeFileSync threw mid-write) is left in place — the next persist
       // overwrites it, and the atomic-rename guarantee means the real target is
       // never touched by a failed write (only renameSync mutates the target).
+      const wasFailing = this.persistError !== undefined;
       this.persistError = err instanceof Error ? err : new Error(String(err));
+      if (!wasFailing) {
+        // v0.8.0: surface on the FIRST occurrence DURING operation (fail-loud),
+        // not only at startup. Pre-fix the CLI's warnIfStoreErrors ran once
+        // before any mutation, so a persistError set here mid-session was never
+        // re-checked — a failing disk silently dropped persists and the next
+        // restart loaded a stale file with no error, so recently-committed keys
+        // were absent and a same-key retry was forwarded as a NEW action (a
+        // double-submit). The undefined→set transition fires once per failure
+        // episode; a later successful persist clears persistError, so a
+        // recovery→re-failure still re-surfaces (the operator re-learns it
+        // broke again) rather than going quiet after the first warning.
+        this.onError?.(
+          `WARNING — durable write failed: ${this.persistError.message} (dedup decisions continue in-memory; fix the --store path to resume durability)`,
+        );
+      }
     }
   }
 
@@ -393,11 +432,20 @@ export class IdemStore {
             parsed === null ? "null" : typeof parsed
           }); starting clean — previously-committed keys were lost`,
         );
+        this.onError?.(`WARNING — ${this.loadError.message}`);
         return;
       }
       for (const candidate of parsed) {
         const record = this.sanitizeLoadedRecord(candidate);
         if (record) this.records.set(record.key, record);
+      }
+      // Surface repaired cachedResponse fields once at load (fail-loud, not
+      // fail-open) so an operator learns a half-written/hand-edited record was
+      // healed — mirrors the mid-session persistError surfacing.
+      if (this.repairedCachedResponseKeys.length > 0) {
+        this.onError?.(
+          `WARNING — repaired ${this.repairedCachedResponseKeys.length} malformed cachedResponse field(s) (cleared so a same-key retry forwards fresh and repopulates): ${this.repairedCachedResponseKeys.join(", ")}`,
+        );
       }
     } catch (err) {
       // A truncated / partial / unparseable store file (exactly what a crash
@@ -407,6 +455,7 @@ export class IdemStore {
       // {}` returned silently, so an operator never learned that every
       // committed key was gone and a same-key retry would now double-submit.
       this.loadError = err instanceof Error ? err : new Error(String(err));
+      this.onError?.(`WARNING — ${this.loadError.message}`);
     }
   }
 

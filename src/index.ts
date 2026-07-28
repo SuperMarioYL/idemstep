@@ -41,6 +41,7 @@ export type { IdemKey, RequestShape } from "./key.js";
 import { startProxy, IDEM_API_KEY_HEADER, type AuthorizeKey } from "./proxy.js";
 import { IdemStore } from "./store.js";
 import { createHash } from "node:crypto";
+import type { IncomingMessage } from "node:http";
 import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
@@ -163,49 +164,56 @@ function loadApiKeys(spec: string): string[] {
  * operator's key is hashed (never written to the store in raw form) and
  * prepended to the idempotency key, so one shared JSON-file store isolates
  * operators by namespace and the in-flight coalescing map stays per-operator
- * too. An unknown/missing key returns `null` → the proxy responds 401 and does
- * not forward.
+ * too. An unknown/missing key returns `null` → the proxy responds 401 (or 407
+ * on a CONNECT) and does not forward.
+ *
+ * v0.8.0: the key is accepted from EITHER the IdemStep-native `x-idem-api-key`
+ * header OR the standard `Proxy-Authorization` (Basic) that Playwright sends
+ * via `proxy.username/password` (password = key). This is required for the
+ * CONNECT-tunnel auth and the non-transactional-traffic auth added in v0.8.0:
+ * Playwright puts proxy creds on `Proxy-Authorization` (NOT `x-idem-api-key`)
+ * for the CONNECT establishment and for plain-HTTP proxied requests, so without
+ * accepting it the multi-tenant auth would reject the very browser-agent
+ * traffic it is meant to serve. The key is the same operator identity either
+ * way; only the transport header differs.
  */
 function makeAuthorizer(apiKeys: string[]): AuthorizeKey {
   const valid = new Set(apiKeys);
   return (req, idemKey) => {
-    const raw = req.headers[IDEM_API_KEY_HEADER];
-    const apiKey = Array.isArray(raw) ? raw[0] : raw;
+    const apiKey = extractApiKey(req);
     if (!apiKey || !valid.has(apiKey)) return null;
     const ns = createHash("sha256").update(apiKey).digest("hex").slice(0, 16);
     return `${ns}::${idemKey}`;
   };
 }
 
-/** Surface durable-store load + persist failures (fail-loud, not fail-open). */
-function warnIfStoreErrors(store: IdemStore, label: string): void {
-  // loadError is set on startup when the store file could not be recovered
-  // (truncated/partial JSON from a crash mid-persist, or a non-array shape).
-  if (store.loadError) {
-    process.stderr.write(
-      `idemstep ${label}: WARNING — ${store.loadError.message}\n`,
-    );
-  }
-  // persistError is set when a durable write failed (EACCES / ENOSPC / ENOENT
-  // on a read-only, full, or missing store dir). On a fresh startup this is
-  // undefined (no mutation has run yet), but surface it if present (e.g. a
-  // pre-warmed store whose first mutation already failed) so an operator
-  // learns dedup state is not being durably recorded.
-  if (store.persistError) {
-    process.stderr.write(
-      `idemstep ${label}: WARNING — durable write failed: ${store.persistError.message} (dedup decisions continue in-memory; fix the --store path to resume durability)\n`,
-    );
-  }
-  // repairedCachedResponseKeys lists committed records whose persisted
-  // cachedResponse was malformed (missing bodyBase64 / status / headers) and
-  // was cleared on load so a same-key retry forwards fresh instead of crashing
-  // replay() with a TypeError out of Buffer.from(undefined, "base64"). Surface
-  // the repair so an operator learns a half-written/hand-edited record was
-  // healed — fail-loud, not fail-open.
-  if (store.repairedCachedResponseKeys.length > 0) {
-    process.stderr.write(
-      `idemstep ${label}: WARNING — repaired ${store.repairedCachedResponseKeys.length} malformed cachedResponse field(s) (cleared so a same-key retry forwards fresh and repopulates): ${store.repairedCachedResponseKeys.join(", ")}\n`,
-    );
+/**
+ * Read the operator's API key off a proxied request, accepting either the
+ * IdemStep-native `x-idem-api-key` header OR the standard `Proxy-Authorization`
+ * (Basic) that Playwright sends via `proxy.username/password` (password = key).
+ * Used by {@link makeAuthorizer} for transactional auth AND by the v0.8.0
+ * CONNECT / non-transactional auth gates (which call the authorizer with a
+ * sentinel empty idemKey purely to validate the caller's key). Returns `""`
+ * when no usable credential is present.
+ */
+function extractApiKey(req: IncomingMessage): string {
+  const raw = req.headers[IDEM_API_KEY_HEADER];
+  const direct = Array.isArray(raw) ? raw[0] : raw;
+  if (direct) return direct;
+  const paRaw = req.headers["proxy-authorization"];
+  const pa = Array.isArray(paRaw) ? paRaw[0] : paRaw;
+  if (typeof pa !== "string" || !pa.toLowerCase().startsWith("basic ")) return "";
+  try {
+    const decoded = Buffer.from(pa.slice(6), "base64").toString("utf8");
+    // Playwright sends proxy.username/password; accept either non-empty half
+    // so an operator may put the key in either field (password is typical).
+    // Split on the FIRST colon so a password containing colons is preserved.
+    const idx = decoded.indexOf(":");
+    const user = idx >= 0 ? decoded.slice(0, idx) : decoded;
+    const pass = idx >= 0 ? decoded.slice(idx + 1) : "";
+    return pass || user || "";
+  } catch {
+    return "";
   }
 }
 
@@ -245,8 +253,16 @@ async function main(): Promise<void> {
   }
 
   if (args.command === "proxy") {
-    const store = new IdemStore({ filePath: args.store, ttlMs: args.ttlMs });
-    warnIfStoreErrors(store, "proxy");
+    // v0.8.0: surface durable-store errors on first occurrence DURING
+    // operation (not only at startup). The store invokes this onError in
+    // persist()'s catch the first time a write fails mid-session, and in
+    // load() at construction — so a failing disk can no longer silently drop
+    // persists and let a stale store double-submit on the next restart.
+    const store = new IdemStore({
+      filePath: args.store,
+      ttlMs: args.ttlMs,
+      onError: (message) => process.stderr.write(`idemstep proxy: ${message}\n`),
+    });
     const proxy = await startProxy({
       port: args.port ?? 8473,
       host: args.host,
@@ -296,8 +312,14 @@ async function main(): Promise<void> {
     // billing, and local-library multi-user remain out of scope (v0.6.0+).
     const host = args.host ?? "0.0.0.0";
     const storePath = args.store ?? "idemstep-hosted.json";
-    const store = new IdemStore({ filePath: storePath, ttlMs: args.ttlMs });
-    warnIfStoreErrors(store, "hosted");
+    // v0.8.0: surface durable-store errors on first occurrence DURING
+    // operation (not only at startup), so a failing disk mid-session no longer
+    // silently drops persists and lets a stale store double-submit on restart.
+    const store = new IdemStore({
+      filePath: storePath,
+      ttlMs: args.ttlMs,
+      onError: (message) => process.stderr.write(`idemstep hosted: ${message}\n`),
+    });
 
     let authorizeKey: AuthorizeKey | undefined;
     let multiTenant = false;

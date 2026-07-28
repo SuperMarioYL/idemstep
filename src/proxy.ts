@@ -178,8 +178,21 @@ export function startProxy(options: ProxyOptions = {}): Promise<RunningProxy> {
     let idemKey = headerValue(req.headers[IDEM_KEY_HEADER]);
     const rawBody = (req as RawBodyRequest).rawBody ?? Buffer.alloc(0);
 
-    // Non-transactional traffic (no idempotency key) is forwarded untouched.
+    // Non-transactional traffic (no idempotency key) is forwarded untouched —
+    // EXCEPT in multi-tenant mode, where it must carry a valid API key too.
+    // Pre-fix this path forwarded untouched, so omitting x-idem-key bypassed
+    // the per-operator auth entirely: the hosted proxy (bound 0.0.0.0) was an
+    // open relay forwarding non-transactional HTTP to any target. v0.8.0
+    // requires the key here as well (401 on a missing/unknown key); the
+    // authorizer accepts x-idem-api-key OR Proxy-Authorization. Single-tenant
+    // mode (no authorizeKey) is unchanged.
     if (!idemKey) {
+      if (options.authorizeKey && options.authorizeKey(req, "") === null) {
+        res
+          .status(401)
+          .send("idemstep proxy: unauthorized (valid x-idem-api-key required for non-transactional traffic)");
+        return;
+      }
       forward(target, req, rawBody, res, null, store, log, upstreamTimeoutMs);
       return;
     }
