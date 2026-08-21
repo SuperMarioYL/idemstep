@@ -338,11 +338,16 @@ function forwardHttps(
 
     // Pass headers through unmodified except the idem control headers, which are
     // internal to the proxy and must not leak upstream. NO body/token rewriting.
+    // Proxy-Authorization is hop-by-hop per RFC 7230 §6.1 and is stripped here for
+    // parity with the plaintext proxy's forward() — a proxy must not forward it
+    // upstream. (The browser's end-to-end HTTPS request does not normally carry
+    // it, but the strip is defensive and keeps the two forward paths consistent.)
     const outHeaders = { ...req.headers } as Record<string, string | string[] | undefined>;
     delete outHeaders[IDEM_KEY_HEADER];
     delete outHeaders[IDEM_API_KEY_HEADER];
     delete outHeaders["x-idem-label"];
     delete outHeaders["proxy-connection"];
+    delete outHeaders["proxy-authorization"];
     outHeaders.host = url.host;
 
     // One settled flag guards the whole forward so the request-level and
@@ -369,6 +374,36 @@ function forwardHttps(
         rejectUnauthorized: upstreamTls?.rejectUnauthorized,
       },
       (upRes) => {
+        // Non-transactional tunnel traffic (commit === null) is meant to pass
+        // through untouched. Pre-fix this branch buffered the entire upstream
+        // body and only called res.end() on "end" — so a non-transactional
+        // SSE / streaming response over the tunnel that never emits "end" left
+        // the tunnel client hanging indefinitely. Stream it through instead
+        // (mirrors the plaintext proxy's forward()): write status + headers on
+        // the response event, each chunk via res.write as it arrives, res.end()
+        // on "end". The buffer-then-cache-and-commit path stays only for
+        // commit !== null, where the full body is needed for replay.
+        if (!commit) {
+          res.writeHead(upRes.statusCode ?? 200, snapshotHeaders(upRes.headers));
+          upRes.on("data", (c: Buffer) => res.write(c));
+          upRes.on("end", () => {
+            if (settled) return;
+            settled = true;
+            res.end();
+            // Non-transactional callers ignore the resolved value; settle the
+            // promise so the .catch handler / finally cleanup runs. No caching
+            // occurs (commit is null).
+            resolve({
+              status: upRes.statusCode ?? 200,
+              headers: snapshotHeaders(upRes.headers),
+              bodyBase64: "",
+            });
+          });
+          upRes.on("error", (err) => fail(err, "response"));
+          upRes.on("aborted", () => fail(new Error("upstream response aborted"), "response"));
+          return;
+        }
+
         const chunks: Buffer[] = [];
         upRes.on("data", (c: Buffer) => chunks.push(c));
         upRes.on("end", () => {
