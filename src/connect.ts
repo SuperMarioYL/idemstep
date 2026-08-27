@@ -362,6 +362,15 @@ function forwardHttps(
       // un-expirable poison-pending key (mirrors the plaintext proxy).
       if (commit) store.delete(commit.idemKey);
       if (!res.headersSent) res.writeHead(502).end(`idemstep tunnel upstream error: ${err.message}`);
+      // v0.9.0 streaming path (commit === null) calls res.writeHead on the
+      // response event and streams chunks via res.write BEFORE "end", so a
+      // mid-stream "error"/"aborted" finds res.headersSent already true — the 502
+      // above is (correctly) skipped, but without this the partial response is
+      // never ended and the tunnel client hangs until its own timeout. End it
+      // here (mirrors the plaintext proxy's forward()). The buffering path sends
+      // headers only at "end", so this else is dead there; `settled` guarantees
+      // res.end() fires once.
+      else res.end();
       reject(err);
     };
 

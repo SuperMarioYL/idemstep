@@ -193,7 +193,17 @@ export function startProxy(options: ProxyOptions = {}): Promise<RunningProxy> {
           .send("idemstep proxy: unauthorized (valid x-idem-api-key required for non-transactional traffic)");
         return;
       }
-      forward(target, req, rawBody, res, null, store, log, upstreamTimeoutMs);
+      // Catch the rejection so an upstream error (connection refused / DNS / idle
+      // timeout / mid-stream abort) does not surface as an unhandled rejection:
+      // forward() rejects via fail() on every upstream error, and fail() already
+      // wrote the 502 to `res` here (commit is null, so no record to release).
+      // Under Node's default `--unhandled-rejections=throw` an uncaught rejection
+      // crashes the proxy process on ANY non-transactional GET/page-load whose
+      // upstream errors — taking down exactly-once for every tenant of the
+      // 0.0.0.0-bound hosted proxy. The transactional call site (below, .catch at
+      // the `settled` chain) and the tunnel's non-transactional call site
+      // (connect.ts) both already catch; only this site was missing it.
+      forward(target, req, rawBody, res, null, store, log, upstreamTimeoutMs).catch(() => {});
       return;
     }
 
@@ -433,6 +443,15 @@ function forward(
       // an un-expirable poison-pending key into the store / JSON file (m6).
       if (commit) store.delete(commit.idemKey);
       if (!res.headersSent) res.status(502).send(`idemstep proxy upstream error: ${err.message}`);
+      // v0.9.0 streaming path (commit === null) sends res.status/headers on the
+      // response event and streams chunks via res.write BEFORE "end", so a
+      // mid-stream "error"/"aborted" finds res.headersSent already true — the 502
+      // above is (correctly) skipped, but without this the partial response is
+      // never ended and the client hangs until its own timeout. End it here. The
+      // buffering path (commit !== null) sends headers only at "end", so this
+      // else is dead there; `settled` guarantees fail() runs at most once and the
+      // "end" handler checks `if (settled) return` first, so res.end() fires once.
+      else res.end();
       reject(err);
     };
 
