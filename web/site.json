@@ -46,13 +46,15 @@
     "en": "Slow submit + self-healing retry = once, not twice"
    },
    "body": {
-    "zh": "给浏览器 Agent 的每一步套上客户端生成的幂等键——自愈重试在请求出去之前就被去重，慢但成功的提交不会再下一次单。哪怕后端收了连接就卡死不回，也不会把键卡成永远过不去的毒占位：超时一到就走失败路径放掉键，下一次重试直接重新发，不会粘在卡死的转发上。",
-    "en": "Give your browser Agent's every step a client-generated idempotency key — self-healing retries are deduped BEFORE the request goes out, so a slow-but-successful submit never re-charges. Even a backend that accepts the connection then goes silent can't poison the key: on timeout it takes the failure path and releases the key, so the next retry forwards fresh instead of coalescing onto a hung forward."
+   "zh": "给浏览器 Agent 的每一步套上客户端生成的幂等键——自愈重试在请求出去之前就被去重，慢但成功的提交不会再下一次单。哪怕后端收了连接就卡死不回，也不会把键卡成永远过不去的毒占位：超时一到就走失败路径放掉键，下一次重试直接重新发，不会粘在卡死的转发上。非事务流(页面加载/GET/SSE)的上游出错也不会拖垮代理——死连接、DNS 抖动不再让进程崩；流式响应中途断开也会干净收尾，不会把客户端卡到超时。",
+   "en": "Give your browser Agent's every step a client-generated idempotency key — self-healing retries are deduped BEFORE the request goes out, so a slow-but-successful submit never re-charges. Even a backend that accepts the connection then goes silent can't poison the key: on timeout it takes the failure path and releases the key, so the next retry forwards fresh instead of coalescing onto a hung forward. And a non-transactional upstream error — a dead asset host, a DNS hiccup, or a mid-stream abort on a streamed GET — no longer crashes the proxy process or hangs the client: the failure is swallowed and the partial stream is terminated cleanly."
    },
    "chips": [
     "› 同一键重放，不重跑",
     "› 后端卡死不毒占位",
-    "› 重试被抑制时对账单可见"
+    "› 重试被抑制时对账单可见",
+    "› 上游出错不崩进程",
+    "› 流式中断不卡客户端"
    ]
   },
   {
@@ -131,6 +133,6 @@
    "en": "The idempotency-key layer for browser-agent retries · open source Apache-2.0"
   }
  },
- "content_version": "v0.9.0",
- "generated_at": "2026-08-21T07:01:15Z"
+ "content_version": "v0.10.0",
+ "generated_at": "2026-08-27T18:31:00Z"
 }
