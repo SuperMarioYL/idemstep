@@ -15,6 +15,7 @@
 
 export { idemStep, setDefaultStore, getDefaultStore } from "./idemStep.js";
 export type { IdemStepOptions } from "./idemStep.js";
+export { VERSION } from "./version.js";
 export { IdemStore } from "./store.js";
 export type {
   StepRecord,
@@ -40,6 +41,7 @@ export type { IdemKey, RequestShape } from "./key.js";
 
 import { startProxy, IDEM_API_KEY_HEADER, type AuthorizeKey } from "./proxy.js";
 import { IdemStore } from "./store.js";
+import { VERSION } from "./version.js";
 import { createHash } from "node:crypto";
 import type { IncomingMessage } from "node:http";
 import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
@@ -53,6 +55,8 @@ interface ParsedArgs {
   ttlMs?: number;
   https: boolean;
   help: boolean;
+  /** `--version` / `-v` was passed: print `idemstep <VERSION>` and exit. */
+  version: boolean;
   /** `--api-keys` value: a comma-separated list or a path to a keys file. */
   apiKeys?: string;
   /** `--prune-interval` value in ms: how often to sweep TTL-expired keys. */
@@ -67,10 +71,11 @@ interface ParsedArgs {
 }
 
 function parseArgs(argv: string[]): ParsedArgs {
-  const out: ParsedArgs = { help: false, https: false };
+  const out: ParsedArgs = { help: false, https: false, version: false };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     if (arg === "--help" || arg === "-h") out.help = true;
+    else if (arg === "--version" || arg === "-v") out.version = true;
     else if (arg === "--port" || arg === "-p") out.port = Number(argv[++i]);
     else if (arg === "--host") out.host = argv[++i];
     else if (arg === "--store" || arg === "-s") out.store = argv[++i];
@@ -138,6 +143,7 @@ Options:
                     request; dedup state is namespaced per key. Omit for
                     single-tenant mode.
   -h, --help        Show this help
+  -v, --version     Print the idemstep version and exit
 `;
 
 /**
@@ -246,6 +252,16 @@ function schedulePrune(
 
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
+
+  // `--version` / `-v` short-circuits before the help/USAGE banner so the
+  // single source of truth (src/version.ts VERSION) is reachable from the
+  // CLI — pre-fix `idemstep --version` was an unknown `-`-prefixed arg that
+  // fell through to the USAGE banner. The lockstep version test pins this
+  // output to package.json version / site.json content_version / CHANGELOG head.
+  if (args.version) {
+    process.stdout.write(`idemstep ${VERSION}\n`);
+    return;
+  }
 
   if (args.help || !args.command) {
     process.stdout.write(USAGE);

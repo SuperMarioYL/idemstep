@@ -4,6 +4,189 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.0] - 2026-09-07
+
+Version-surface integrity release. Closes the version-drift the bug-hunter found
+on the shipped v0.10.0 tag: the `CHANGELOG.md` head had stalled at `[0.7.0]`
+across the v0.8.0/v0.9.0/v0.10.0 releases, the live `web/site.json`
+`content_version` was stale at `v0.9.0` (one release behind `package.json`
+`0.10.0`), and the CLI had no `--version` surface at all — `idemstep --version`
+fell through to the USAGE banner. This release backfills the missing changelog
+entries, adds a single-source-of-truth `VERSION` constant and a `--version` /
+`-v` flag, and pins all version surfaces together with a lockstep test so the
+drift cannot silently recur.
+
+### Added
+
+- **`--version` / `-v` CLI flag + `src/version.ts` `VERSION` constant.** The
+  CLI had no version surface: `parseArgs` had no `--version`/`-v` branch, so
+  `idemstep --version` was an unknown `-`-prefixed arg, `out.command` stayed
+  undefined, and `main()` printed the USAGE banner instead of a version. There
+  was no `VERSION` file, no version constant exported, and no version test.
+  `src/version.ts` now exports `VERSION` as the single source of truth;
+  `--version` / `-v` prints `idemstep <VERSION>` and exits; `VERSION` is
+  re-exported from `src/index.ts`. A new `test/version.test.ts` asserts
+  `VERSION == package.json version == idemstep --version output ==
+  web/site.json content_version == CHANGELOG head` — a guard that fails on the
+  shipped v0.10.0 tag (no `--version`; site `v0.9.0` != `0.10.0`; CHANGELOG
+  `[0.7.0]` != `0.10.0`), proving the drift was real.
+
+### Fixed
+
+- **Backfilled the `CHANGELOG.md` head that stalled at `[0.7.0]`.** The
+  v0.8.0, v0.9.0, and v0.10.0 releases were entirely undocumented in the
+  changelog — a reader opening `CHANGELOG.md` on the shipped v0.10.0 tag could
+  not discover that v0.8.0 surfaced mid-session persist errors and closed the
+  hosted CONNECT open relay, that v0.9.0 streamed non-transactional upstream
+  responses and stripped `Proxy-Authorization` before forwarding, or that
+  v0.10.0 caught the non-transactional forward unhandled rejection and
+  terminated the mid-stream streaming client. The three missing entries are
+  backfilled below (dated per the release log) and the `[0.6.0]` link reference
+  is added so no changelog heading is a dangling reference.
+
+- **Aligned the stale `web/site.json` `content_version`.** It was `v0.9.0`
+  while `package.json` was `0.10.0`; the live site marketed a version one
+  release behind the shipped code. It is now `v0.11.0`, in lockstep with the
+  package version (the lockstep version test tolerates the `v` prefix the
+  established site pattern uses).
+
+[0.11.0]: https://github.com/SuperMarioYL/idemstep/releases/tag/v0.11.0
+
+## [0.10.0] - 2026-08-27
+
+Correctness release. Closes two high-severity defects in the v0.9.0 streaming
+path: an unhandled rejection that crashed the whole proxy process on any
+non-transactional GET/page-load whose upstream errored, and a mid-stream
+streaming hang where the client was left waiting until its own timeout.
+
+### Fixed
+
+- **Catch the non-transactional `forward()`'s rejection so an upstream error no
+  longer crashes the proxy process.** The plaintext proxy's non-transactional
+  `forward()` call (no `x-idem-key`) was fire-and-forget with no `.catch()`, so
+  any upstream error rejected the forward promise unhandled and (under Node's
+  default `--unhandled-rejections=throw`) crashed the process. `forward()`
+  rejects via `fail()` on every upstream error — the request-leg
+  `upstream.on("error")`, the response-leg `upRes.on("error")`/`"aborted"` in
+  both the streaming and buffering branches, and the idle `upstream.setTimeout`
+  expiry — and `fail()` already wrote the 502 to `res` and released the pending
+  record, so the rejection carried no useful work. The transactional call site
+  and the CONNECT tunnel's non-transactional call site both already caught;
+  only the plaintext proxy's non-transactional site was missing it. A
+  `.catch(() => {})` is now attached there, mirroring the tunnel path. Any
+  non-transactional upstream error (a dead asset host, a DNS hiccup, or an
+  idle-timeout on a GET/page-load forwarded through the proxy) no longer takes
+  down exactly-once for every tenant of the 0.0.0.0-bound hosted proxy.
+
+- **Terminate the client response when a non-transactional streaming upstream
+  errors/aborts mid-stream so the client no longer hangs.** The v0.9.0
+  streaming change moved response header-sending to the response event, so a
+  mid-stream upstream error/abort left the client response hanging instead of
+  returning 502. `forward()`'s non-transactional streaming branch writes
+  `res.status`/`res.setHeader` on the response event and streams chunks via
+  `res.write` on `data`, so `res.headersSent` becomes true as soon as the
+  upstream response arrives — before `end`. On a mid-stream `upRes`
+  `"error"`/`"aborted"`, `fail()`'s `if (!res.headersSent) res.status(502)`
+  guard correctly skipped the 502 (headers already sent) but never ended/destroyed
+  `res`, so the client hung until its own timeout. `fail()` now ends the partial
+  response (`else res.end()`) when headers were already sent, in both `forward`
+  and `forwardHttps`. The `settled` flag guarantees `fail()` runs at most once,
+  so `res.end()` fires once. Scoped to the `commit === null` (non-transactional)
+  streaming branch; the transactional buffering branch (which sends headers only
+  at `end`) was already clean.
+
+[0.10.0]: https://github.com/SuperMarioYL/idemstep/releases/tag/v0.10.0
+
+## [0.9.0] - 2026-08-21
+
+Reliability release. Closes two defects on the non-transactional forward path:
+a buffering behaviour that hung SSE/streaming clients indefinitely, and a
+hop-by-hop header leak that exposed the operator's API key to HTTP upstreams.
+
+### Fixed
+
+- **Stream non-transactional upstream responses instead of buffering so
+  SSE/streaming clients no longer hang.** `forward()` buffered the entire
+  upstream body into `chunks` and only called `res.end(respBody)` inside the
+  `upRes.on("end")` handler. This branch ran unconditionally — including for
+  non-transactional traffic forwarded with `commit === null`, which is meant to
+  pass through untouched. A non-transactional SSE/streaming response keeps the
+  upstream connection open and emits `data` over time without emitting `end` (a
+  keep-alive SSE stream never ends), so the client received zero bytes until
+  `end` fired — it hung indefinitely; a finite slow chunked response was also
+  held until completion, defeating streaming. `forward()` and `forwardHttps()`
+  now branch on `commit`: when `commit === null` (non-transactional) the
+  upstream response is streamed through to the client (status + headers on the
+  response event, each chunk via `res.write`, `res.end()` on `end`, still
+  routing `error`/`aborted` through the existing `fail()` path) instead of
+  buffering; the buffer-then-cache-and-commit path stays only for
+  `commit !== null`, where the full body is genuinely needed for
+  `CachedResponse` replay.
+
+- **Strip `Proxy-Authorization` before forwarding upstream so the operator's
+  API key is not leaked to HTTP targets.** v0.8.0 made `Proxy-Authorization`
+  (Basic) a first-class accepted operator credential on the plaintext path
+  (Playwright sends `proxy.username/password` as `Proxy-Authorization`), but
+  `forward()` built `outHeaders = { ...req.headers }` and stripped only the
+  idem control headers and `proxy-connection` — it did not delete
+  `proxy-authorization`. So when a client authenticated to the multi-tenant
+  hosted proxy via `Proxy-Authorization: Basic <base64(:apiKey)>` for an HTTP
+  (non-HTTPS) target, that same header — carrying the operator's API key
+  verbatim — was forwarded to the real upstream site on both the
+  transactional and non-transactional forward paths. `proxy-authorization` is
+  now deleted from `outHeaders` in both `forward()` and `forwardHttps()`, per
+  RFC 7230 §6.1 (hop-by-hop; a proxy must not forward it). The HTTPS/CONNECT
+  path was not affected in practice because the browser's end-to-end HTTPS
+  request does not carry `Proxy-Authorization`.
+
+[0.9.0]: https://github.com/SuperMarioYL/idemstep/releases/tag/v0.9.0
+
+## [0.8.0] - 2026-07-28
+
+Security and reliability release. Closes a silent double-submit hole on the
+durable-store path and an open-relay auth bypass on the hosted CONNECT tunnel.
+
+### Fixed
+
+- **Surface mid-session durable-write failures so a stale store can no longer
+  silently double-submit on restart.** `warnIfStoreErrors(store, ...)` was
+  called ONCE at startup (before any mutation had run), so `store.persistError`
+  was always undefined there. `persist()` set `store.persistError` in its catch
+  only when a write actually failed mid-session, and nothing re-checked it after
+  startup — the v0.6.0 "fail-loud" promise was therefore unfulfilled for a
+  running proxy. While the disk was failing the JSON file went stale (persists
+  were dropped), and on the next restart `load()` read that stale file with no
+  parse error, so `loadError` stayed undefined too: recently-committed keys
+  were silently absent, `isCommitted(k)` returned false, and a same-key retry
+  was forwarded as a NEW action — a double-submit — with zero operator
+  visibility across the whole cycle. `IdemStore` now takes an optional
+  `onError` callback invoked in `persist()`'s catch on the
+  `undefined → set` transition (and re-surfaces on a recovery → re-failure),
+  and in `load()` when `loadError`/repaired keys are populated; the `proxy` /
+  `hosted` CLI bodies pass a stderr-logging callback so the failure is surfaced
+  on first occurrence during operation, not only at startup.
+
+- **Authenticate the CONNECT tunnel and non-transactional traffic so
+  `--api-keys` can no longer be bypassed (open relay).** `authorizeKey` was
+  consulted ONLY for transactional requests that carry `x-idem-key`. The
+  CONNECT establishment itself performed no auth check at all — it wrote
+  `200 Connection Established` and terminated the tunnel for any caller — and
+  all non-transactional traffic (no `x-idem-key`) was forwarded untouched in
+  both the plaintext handler and the tunnel handler. The multi-tenant hosted
+  proxy is bound `0.0.0.0` for remote Playwright contexts, so with `--api-keys`
+  set it was still an open relay: an unauthenticated remote client could
+  CONNECT to arbitrary `host:port` (SMTP relay / internal SSH / anonymizing
+  proxy) and forward non-transactional HTTP/HTTPS to any target simply by
+  omitting `x-idem-key`. When `authorizeKey` is set, the CONNECT request itself
+  is now authenticated in `onConnect` (standard `Proxy-Authorization`, which
+  Playwright sends via `proxy.username/password`, or the `x-idem-api-key`
+  header) and rejected with `407` on a missing/unknown key; and a valid
+  `x-idem-api-key` is required on non-transactional requests too in both the
+  plaintext handler and the tunnel handler (`401` if missing). Single-tenant
+  mode (no `authorizeKey`) is unchanged.
+
+[0.8.0]: https://github.com/SuperMarioYL/idemstep/releases/tag/v0.8.0
+
 ## [0.7.0] - 2026-07-25
 
 Reliability-continuation release. Closes two adversarial exactly-once defects:
@@ -108,6 +291,8 @@ v0.5.0 started with automatic pruning.
   persist clears it. The hosted/proxy CLI surfaces `persistError` alongside
   `loadError` on startup so an operator learns dedup state is not being durably
   recorded.
+
+[0.6.0]: https://github.com/SuperMarioYL/idemstep/releases/tag/v0.6.0
 
 ## [0.5.0] - 2026-07-03
 
