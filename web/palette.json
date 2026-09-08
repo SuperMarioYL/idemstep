@@ -1,0 +1,38 @@
+{
+  "mode": "auto",
+  "id": "d556e6-e76ab3-d2acf6-3215de920bc7",
+  "identity": "https://github.com/supermarioyl/idemstep",
+  "primary": "#d556e6",
+  "secondary": "#e76ab3",
+  "highlight": "#d2acf6",
+  "dark": {
+    "bg": "#090712",
+    "panel": "#12101f",
+    "code": "#130d1d",
+    "ink": "#f6eefd",
+    "muted": "#af9cc4",
+    "line": "#361841",
+    "primary": "#d556e6",
+    "secondary": "#e76ab3",
+    "highlight": "#d2acf6",
+    "accent": "#d556e6",
+    "buttonStart": "#b448c2",
+    "buttonEnd": "#b7548d",
+    "buttonText": "#ffffff"
+  },
+  "light": {
+    "bg": "#fef9fe",
+    "panel": "#fdf7fe",
+    "code": "#fcf3fd",
+    "ink": "#251630",
+    "muted": "#6f5e88",
+    "line": "#f3cbf7",
+    "primary": "#ac45b9",
+    "secondary": "#ae5087",
+    "highlight": "#7e6894",
+    "accent": "#ac45b9",
+    "buttonStart": "#b448c2",
+    "buttonEnd": "#b7548d",
+    "buttonText": "#ffffff"
+  }
+}

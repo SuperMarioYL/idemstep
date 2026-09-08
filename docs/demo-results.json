@@ -1,0 +1,13 @@
+{
+  "schema": 1,
+  "source_revision": "fcaa3f9ba0cd848a847f2a6655f044ab361a55fb",
+  "scope": "Real HTTP proxy deduplication against a loopback fixture; no browser or external transaction.",
+  "steps": [
+    {
+      "label": "Recorded run",
+      "body": "Real HTTP proxy deduplication against a loopback fixture; no browser or external transaction.",
+      "command": "node examples/presentation-demo.mjs",
+      "output": "{\"key\":\"order-demo-1\",\"status\":200,\"replayed\":false,\"body\":{\"order\":1}}\n{\"key\":\"order-demo-1\",\"status\":200,\"replayed\":true,\"body\":{\"order\":1}}\n{\"key\":\"order-demo-2\",\"status\":200,\"replayed\":false,\"body\":{\"order\":2}}\nupstream calls=2; suppressed retries=1\nScope: local HTTP fixture; no browser, payment provider or external order."
+    }
+  ]
+}

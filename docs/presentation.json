@@ -1,0 +1,82 @@
+{
+  "name": "IdemStep",
+  "tagline": "Make a retry reuse its first result",
+  "architecture": {
+    "title": "One key joins the step, store and proxy",
+    "nodes": [
+      {
+        "title": "Caller",
+        "detail": "stable logical-action key"
+      },
+      {
+        "title": "Wrapper / proxy",
+        "detail": "first call or replay"
+      },
+      {
+        "title": "IdemStore",
+        "detail": "pending and committed records"
+      },
+      {
+        "title": "HTTP upstream",
+        "detail": "first keyed request"
+      }
+    ],
+    "edges": [
+      [
+        0,
+        1
+      ],
+      [
+        1,
+        2
+      ],
+      [
+        1,
+        3
+      ]
+    ]
+  },
+  "process": {
+    "title": "From input to a useful result",
+    "steps": [
+      {
+        "title": "First key",
+        "detail": "forward local POST"
+      },
+      {
+        "title": "Repeat key",
+        "detail": "replay order 1"
+      },
+      {
+        "title": "New key",
+        "detail": "forward order 2"
+      }
+    ],
+    "result": "Three local HTTP requests reach the upstream twice; one duplicate response is replayed."
+  },
+  "integrations": {
+    "title": "Supported input and output routes",
+    "items": [
+      {
+        "title": "JavaScript",
+        "detail": "idemStep wrapper"
+      },
+      {
+        "title": "HTTP proxy",
+        "detail": "x-idem-key request routing"
+      },
+      {
+        "title": "Playwright",
+        "detail": "explicit proxy and headers"
+      },
+      {
+        "title": "JSON file",
+        "detail": "completed-record persistence"
+      },
+      {
+        "title": "HTTPS CONNECT",
+        "detail": "optional local CA interception"
+      }
+    ]
+  }
+}

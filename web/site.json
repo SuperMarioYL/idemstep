@@ -1,138 +1,215 @@
 {
- "schema": 1,
- "name": "idemstep",
- "github": "https://github.com/SuperMarioYL/idemstep",
- "host": "idemstep.lei6393.com",
- "lang": {
-  "primary": "zh",
-  "toggle": true
- },
- "accent": [
-  "#7C5CFF",
-  "#6342F5",
-  "#4A2EE6"
- ],
- "hero": {
-  "eyebrow": {
-   "zh": "重试 · 恰好一次 · 浏览器 Agent",
-   "en": "Retries · Exactly-once · Browser agents"
+  "schema": 3,
+  "name": "IdemStep",
+  "github": "https://github.com/SuperMarioYL/idemstep",
+  "host": "idemstep.lei6393.com",
+  "palette": "auto",
+  "lang": {
+    "primary": "en",
+    "toggle": true
   },
-  "headline": {
-   "zh": "Agent 重试点了一次下单\n而不是两次",
-   "en": "Your agent retries the order once\nnot twice"
+  "meta": {
+    "visual_style": "neon-particle",
+    "demo_source": "docs/demo-results.json"
   },
-  "sub": {
-   "zh": "给浏览器 Agent 的每一步套上客户端生成的幂等键——自愈重试在请求出去之前就被去重，慢但成功的提交不会再下一次单。",
-   "en": "Wrap each browser-agent step with a client-generated idempotency key so a self-healing retry is deduplicated before the request ever leaves — a slow-but-successful submit no longer places the order twice."
+  "hero": {
+    "headline": {
+      "en": "Make a retry reuse its first result",
+      "zh": "让重试复用第一次结果"
+    },
+    "sub": {
+      "en": "IdemStep associates an action with a stable key. Its JavaScript wrapper reuses completed step results, and its HTTP proxy replays cached responses for repeated keyed requests.",
+      "zh": "IdemStep 为操作绑定稳定的 Key。JavaScript 包装器复用已完成步骤的结果，HTTP 代理则为重复的带 Key 请求回放缓存响应。"
+    },
+    "href": "#quickstart"
   },
-  "command": "npx idemstep proxy",
-  "cta": {
-   "zh": "开始用",
-   "en": "Get started"
+  "advantages": [
+    {
+      "title": {
+        "en": "Reuse a result",
+        "zh": "复用结果"
+      },
+      "body": {
+        "en": "Completed keys replay cached wrapper values or HTTP responses.",
+        "zh": "已完成的 Key 回放包装器返回值或 HTTP 响应。"
+      }
+    },
+    {
+      "title": {
+        "en": "Coalesce concurrent retries",
+        "zh": "合并并发重试"
+      },
+      "body": {
+        "en": "Same-key callers share an in-flight operation within the process.",
+        "zh": "同一进程内，同 Key 调用共享进行中的操作。"
+      }
+    },
+    {
+      "title": {
+        "en": "Choose the retention window",
+        "zh": "选择保留窗口"
+      },
+      "body": {
+        "en": "Use an in-memory store or JSON persistence, with optional committed-key TTL.",
+        "zh": "可使用内存或 JSON 持久化存储，并设置已完成 Key 的 TTL。"
+      }
+    }
+  ],
+  "demo": {
+    "title": {
+      "en": "Run it on a complete example",
+      "zh": "运行完整示例"
+    },
+    "note": {
+      "en": "The script starts a real local proxy and a synthetic order endpoint. Two POSTs share order-demo-1; the third uses order-demo-2. It counts actual upstream calls and reads the replay header.",
+      "zh": "脚本启动实际本地代理和合成订单接口。两次 POST 使用 order-demo-1，第三次使用 order-demo-2，统计实际上游调用并读取回放 Header。"
+    },
+    "source": "https://github.com/SuperMarioYL/idemstep/blob/main/docs/demo-results.json",
+    "steps": [
+      {
+        "label": "Recorded run",
+        "body": "Real HTTP proxy deduplication against a loopback fixture; no browser or external transaction.",
+        "command": "node examples/presentation-demo.mjs",
+        "output": "{\"key\":\"order-demo-1\",\"status\":200,\"replayed\":false,\"body\":{\"order\":1}}\n{\"key\":\"order-demo-1\",\"status\":200,\"replayed\":true,\"body\":{\"order\":1}}\n{\"key\":\"order-demo-2\",\"status\":200,\"replayed\":false,\"body\":{\"order\":2}}\nupstream calls=2; suppressed retries=1\nScope: local HTTP fixture; no browser, payment provider or external order.",
+        "image": "/assets/presentation/demo-0-light.svg",
+        "imageDark": "/assets/presentation/demo-0-dark.svg"
+      }
+    ]
   },
-  "ctaGithub": {
-   "zh": "GitHub",
-   "en": "GitHub"
+  "quickstart": {
+    "title": {
+      "en": "Try it locally",
+      "zh": "本地上手"
+    },
+    "body": {
+      "en": "The script starts a real local proxy and a synthetic order endpoint. Two POSTs share order-demo-1; the third uses order-demo-2. It counts actual upstream calls and reads the replay header.",
+      "zh": "脚本启动实际本地代理和合成订单接口。两次 POST 使用 order-demo-1，第三次使用 order-demo-2，统计实际上游调用并读取回放 Header。"
+    },
+    "steps": [
+      {
+        "title": {
+          "en": "Install from source",
+          "zh": "从源码安装"
+        },
+        "code": "git clone https://github.com/SuperMarioYL/idemstep.git\ncd idemstep\nnpm ci\nnpm run build"
+      },
+      {
+        "title": {
+          "en": "Run the included example",
+          "zh": "运行随仓示例"
+        },
+        "code": "node examples/presentation-demo.mjs"
+      }
+    ]
   },
-  "scroll": {
-   "zh": "往下看",
-   "en": "Scroll"
+  "limitations": [
+    {
+      "en": "This is local deduplication, not an end-to-end exactly-once guarantee. A crash after an upstream side effect but before durable commit can leave an ambiguous outcome.",
+      "zh": "这是本地去重，不能保证端到端严格执行一次。上游已生效但尚未持久化提交时崩溃，结果仍可能不确定。"
+    },
+    {
+      "en": "The store is not designed for independently running processes to concurrently share one JSON file.",
+      "zh": "存储不适用于多个独立进程并发共享同一 JSON 文件。"
+    },
+    {
+      "en": "The demo covers local HTTP responses; it does not validate browser integration, payment APIs or HTTPS trust setup.",
+      "zh": "示例覆盖本地 HTTP 响应，没有验证浏览器集成、支付 API 或 HTTPS 信任配置。"
+    }
+  ],
+  "scene": {
+    "kind": "neon-graph",
+    "fallback": "/assets/presentation/scene-dark.svg",
+    "fallbackLight": "/assets/presentation/scene-light.svg"
+  },
+  "story": {
+    "intro": {
+      "title": {
+        "en": "A concrete task",
+        "zh": "从实际任务出发"
+      },
+      "body": {
+        "en": "A slow response can make a browser workflow retry a submit that already completed. Keeping one key for that logical action lets the local store recognize the retry, while a new key explicitly starts a new action.",
+        "zh": "响应缓慢可能使浏览器工作流再次提交已经完成的操作。同一逻辑操作沿用一个 Key，本地存储即可识别重试；新 Key 则明确表示新操作。"
+      }
+    },
+    "sections": [
+      {
+        "title": {
+          "en": "Follow the operation",
+          "zh": "处理过程"
+        },
+        "body": {
+          "en": "idemStep owns the local function lifecycle. IdemStore tracks pending and committed records plus cached values. startProxy reads x-idem-key, forwards the first request, stores the full response and serves later same-key calls from that cache. In-flight maps coalesce concurrent callers; JSON persistence keeps completed records for a restart.",
+          "zh": "idemStep 管理本地函数生命周期；IdemStore 保存 pending、committed 状态及缓存值。startProxy 读取 x-idem-key，转发首次请求，存储完整响应，再从缓存处理后续同 Key 调用。进行中映射合并并发调用，JSON 持久化保留已完成记录供重启使用。"
+        },
+        "image": {
+          "light": "/assets/presentation/process-light.svg",
+          "dark": "/assets/presentation/process-dark.svg",
+          "alt": {
+            "en": "Follow the operation",
+            "zh": "处理过程"
+          }
+        }
+      },
+      {
+        "title": {
+          "en": "One key joins the step, store and proxy",
+          "zh": "Key 串联步骤、存储与代理"
+        },
+        "body": {
+          "en": "idemStep owns the local function lifecycle. IdemStore tracks pending and committed records plus cached values. startProxy reads x-idem-key, forwards the first request, stores the full response and serves later same-key calls from that cache. In-flight maps coalesce concurrent callers; JSON persistence keeps completed records for a restart.",
+          "zh": "idemStep 管理本地函数生命周期；IdemStore 保存 pending、committed 状态及缓存值。startProxy 读取 x-idem-key，转发首次请求，存储完整响应，再从缓存处理后续同 Key 调用。进行中映射合并并发调用，JSON 持久化保留已完成记录供重启使用。"
+        },
+        "image": {
+          "light": "/assets/presentation/architecture-light.svg",
+          "dark": "/assets/presentation/architecture-dark.svg",
+          "alt": {
+            "en": "One key joins the step, store and proxy",
+            "zh": "Key 串联步骤、存储与代理"
+          }
+        }
+      },
+      {
+        "title": {
+          "en": "Connect the pieces",
+          "zh": "输入与输出"
+        },
+        "body": {
+          "en": "The wrapper and proxy are separate integration points. The wrapper does not automatically attach network headers to a browser request: configure the browser’s proxy and request headers explicitly. HTTP requests without an idempotency key pass through without deduplication.",
+          "zh": "包装器和代理是两个接入位置。包装器不会自动向浏览器请求添加网络 Header，需显式配置浏览器代理及请求头。不带幂等 Key 的 HTTP 请求透传，不参与去重。"
+        },
+        "image": {
+          "light": "/assets/presentation/integrations-light.svg",
+          "dark": "/assets/presentation/integrations-dark.svg",
+          "alt": {
+            "en": "Connect the pieces",
+            "zh": "输入与输出"
+          }
+        }
+      }
+    ],
+    "details": [
+      {
+        "title": {
+          "en": "Configuration",
+          "zh": "配置"
+        },
+        "body": {
+          "en": "--host 127.0.0.1 keeps the proxy local; omitted host binds all interfaces. --store enables JSON persistence. --ttl expires committed keys, after which the same key may forward again; --prune-interval sweeps expired records. --upstream-timeout bounds idle upstream traffic. --https requires OpenSSL and client trust in the generated CA. Hosted mode adds configurable API-key namespaces but does not provide a distributed transaction store or billing service.",
+          "zh": "--host 127.0.0.1 将代理限制在本机，省略 host 会监听所有接口。--store 启用 JSON 持久化。--ttl 使已完成 Key 过期，之后同 Key 可能再次转发；--prune-interval 清理过期记录。--upstream-timeout 限定上游空闲时间。--https 需要 OpenSSL，并要求客户端信任生成的 CA。hosted 模式提供可配置 API Key 命名空间，但没有分布式事务存储或计费服务。"
+        }
+      },
+      {
+        "title": {
+          "en": "Further use",
+          "zh": "进一步使用"
+        },
+        "body": {
+          "en": "For the library, import idemStep, generateKey and IdemStore from idemstep. Generate the key once for a logical operation, keep it across retries, and pass the same store to calls that share results. For the proxy, send x-idem-key with the intercepted request; see examples/presentation-demo.mjs for complete HTTP input. A new intent needs a new key even if its body is identical.",
+          "zh": "库用法从 idemstep 导入 idemStep、generateKey 和 IdemStore。每项逻辑操作生成一次 Key，重试时保留，需共享结果的调用使用同一存储。代理用法是在被拦截请求中传入 x-idem-key，完整 HTTP 输入见 examples/presentation-demo.mjs。新的操作意图即使内容相同，也应使用新 Key。"
+        },
+        "code": "node dist/index.js proxy --host 127.0.0.1 --port 8473 --store ./idemstep-state.json --ttl 86400000 --prune-interval 60000"
+      }
+    ]
   }
- },
- "advantages": [
-  {
-   "title": {
-    "zh": "慢提交 + 自愈重试 = 一次，不是两次",
-    "en": "Slow submit + self-healing retry = once, not twice"
-   },
-   "body": {
-   "zh": "给浏览器 Agent 的每一步套上客户端生成的幂等键——自愈重试在请求出去之前就被去重，慢但成功的提交不会再下一次单。哪怕后端收了连接就卡死不回，也不会把键卡成永远过不去的毒占位：超时一到就走失败路径放掉键，下一次重试直接重新发，不会粘在卡死的转发上。非事务流(页面加载/GET/SSE)的上游出错也不会拖垮代理——死连接、DNS 抖动不再让进程崩；流式响应中途断开也会干净收尾，不会把客户端卡到超时。",
-   "en": "Give your browser Agent's every step a client-generated idempotency key — self-healing retries are deduped BEFORE the request goes out, so a slow-but-successful submit never re-charges. Even a backend that accepts the connection then goes silent can't poison the key: on timeout it takes the failure path and releases the key, so the next retry forwards fresh instead of coalescing onto a hung forward. And a non-transactional upstream error — a dead asset host, a DNS hiccup, or a mid-stream abort on a streamed GET — no longer crashes the proxy process or hangs the client: the failure is swallowed and the partial stream is terminated cleanly."
-   },
-   "chips": [
-    "› 同一键重放，不重跑",
-    "› 后端卡死不毒占位",
-    "› 重试被抑制时对账单可见",
-    "› 上游出错不崩进程",
-    "› 流式中断不卡客户端"
-   ]
-  },
-  {
-   "title": {
-    "zh": "真 HTTPS 结账页也能去重",
-    "en": "Dedup works against real HTTPS checkout pages"
-   },
-   "body": {
-    "zh": "浏览器把真实结账流量走 HTTPS 隧道。IdemStep 用本地可信的中间人终止隧道、解密流量，对它跑同一套去重逻辑——不只是明文测试页面。",
-    "en": "A browser sends real checkout traffic over an HTTPS tunnel. IdemStep terminates the tunnel with a locally-trusted cert, decrypts the traffic, and runs the same dedup over it — not just plaintext test pages."
-   },
-   "chips": [
-    "› 真站点，非 mock",
-    "› 本地可信 CA",
-    "› 一行配进 Playwright"
-   ]
-  },
-  {
-   "title": {
-    "zh": "不想自己运维代理？用托管版",
-    "en": "Don't want to run the proxy? Use the hosted one"
-   },
-   "body": {
-    "zh": "跨站拦截层自己可靠地跑起来很难。把远端 Playwright 指向托管端点，多个操作者共用一个 URL、彼此命名空间隔离，享受托管的“恰好一次”——单操作者鉴权与路由已就绪。",
-    "en": "The cross-site interception layer is genuinely hard to self-host reliably. Point a remote Playwright context at the hosted endpoint; multiple operators share one URL in isolated namespaces for managed exactly-once — single-operator auth and routing are ready today."
-   },
-   "chips": [
-    "› 多操作者按 key 隔离",
-    "› 托管 = 免运维",
-    "› 失败软，不静默"
-   ]
-  },
-  {
-   "title": {
-    "zh": "崩溃重启不丢已下单的键",
-    "en": "A crash and restart doesn't lose the keys you already placed"
-   },
-   "body": {
-    "zh": "给浏览器 Agent 的每一步套上客户端生成的幂等键——自愈重试在请求出去之前就被去重，慢但成功的提交不会再下一次单。键状态原子写盘，崩溃重启不丢已下单的键；哪怕缓存记录被改坏或写了一半，加载时会自愈修掉再走新一次，而不是 replay 时崩。",
-    "en": "Idempotency-key state is atomically persisted, so a crash-restart never loses an already-placed key. Even a cached response record that got hand-edited or half-written self-heals on load — the bad cache is cleared and the next retry forwards fresh, instead of crashing replay."
-   },
-   "chips": [
-    "› 原子写盘",
-    "› 坏缓存自愈不崩",
-    "› 过期键自动清扫"
-   ]
-  }
- ],
- "scene": {
-  "kind": "hub-nodes",
-  "nodes": [
-   "Playwright Agent",
-   "Local Proxy",
-   "IdemStore",
-   "Hosted Proxy",
-   "Checkout Site"
-  ]
- },
- "cta": {
-  "headline": {
-   "zh": "让你的 Agent 重试时不再多扣一次",
-   "en": "Stop your agent from charging twice on a retry"
-  },
-  "sub": {
-   "zh": "三步：装包、起代理、把那一步包进 idemStep()。",
-   "en": "Three steps: install, start the proxy, wrap the step in idemStep()."
-  },
-  "button": {
-   "zh": "看 10 秒演示",
-   "en": "Watch the 10s demo"
-  }
- },
- "footer": {
-  "tag": {
-   "zh": "浏览器 Agent 重试的幂等键层 · 开源 Apache-2.0",
-   "en": "The idempotency-key layer for browser-agent retries · open source Apache-2.0"
-  }
- },
- "content_version": "v0.11.0",
- "generated_at": "2026-09-07T04:15:24Z"
 }

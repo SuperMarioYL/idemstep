@@ -1,7 +1,7 @@
 {
   "name": "idemstep",
   "version": "0.11.0",
-  "description": "Stripe's Idempotency-Key, but for your browser agent: wrap a transactional browser step with a client-generated key so a self-healing retry after a slow-but-successful submit is deduplicated instead of placing the order twice.",
+  "description": "Deduplicate keyed agent steps and HTTP retries with cached results, a local proxy and optional JSON-file persistence.",
   "keywords": [
     "idempotency",
     "idempotency-key",
