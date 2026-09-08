@@ -211,5 +211,6 @@
         "code": "node dist/index.js proxy --host 127.0.0.1 --port 8473 --store ./idemstep-state.json --ttl 86400000 --prune-interval 60000"
       }
     ]
-  }
+  },
+  "content_version": "v0.11.0"
 }
