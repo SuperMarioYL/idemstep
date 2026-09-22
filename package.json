@@ -1,6 +1,6 @@
 {
   "name": "idemstep",
-  "version": "0.11.0",
+  "version": "0.12.0",
   "description": "Deduplicate keyed agent steps and HTTP retries with cached results, a local proxy and optional JSON-file persistence.",
   "keywords": [
     "idempotency",

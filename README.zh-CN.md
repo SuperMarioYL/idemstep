@@ -118,7 +118,7 @@ node dist/index.js proxy --host 127.0.0.1 --port 8473 --store ./idemstep-state.j
 - 存储不适用于多个独立进程并发共享同一 JSON 文件。
 - 示例覆盖本地 HTTP 响应，没有验证浏览器集成、支付 API 或 HTTPS 信任配置。
 
-已实现包装器结果复用、HTTP 回放、并发合并、JSON 持久化、TTL 和可选 CONNECT 拦截。后续方向包括更强的恢复语义和分布式存储。依赖重启持久性前，应查看 CHANGELOG.md 和存储告警。
+已实现包装器结果复用、HTTP 回放、并发合并、JSON 持久化、TTL 和可选 CONNECT 拦截。版本演进：v0.7 为每次上游转发加上空闲超时上限；v0.8 会话中途暴露持久化写入失败，并封堵托管 CONNECT 开放中继；v0.9 非事务响应改为流式透传，并在转发上游前剥离 Proxy-Authorization；v0.10 捕获非事务转发的未处理拒绝，中止挂起的流式客户端；v0.11 增加 `--version` 版本面并加锁步测试；v0.12 将 MITM 叶子证书签发改为异步，CONNECT 隧道不再阻塞事件循环。后续方向包括更强的恢复语义和分布式存储。依赖重启持久性前，应查看 CHANGELOG.md 和存储告警。
 
 ## 许可与贡献
 

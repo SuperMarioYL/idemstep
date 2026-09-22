@@ -17,4 +17,4 @@
  *
  * Bump this constant together with `package.json` when cutting a release.
  */
-export const VERSION = "0.11.0";
+export const VERSION = "0.12.0";

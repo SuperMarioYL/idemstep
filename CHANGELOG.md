@@ -4,6 +4,45 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.0] - 2026-09-23
+
+Reliability release that closes the red main-branch CI. The MITM leaf-cert
+mint ran three synchronous `execFileSync("openssl", ...)` subprocesses
+(RSA-2048 keygen + CSR + CA-sign) inline in the CONNECT handler — blocking the
+whole Node event loop for the mint's duration — which pushed the HTTPS-tunnel
+streaming test's first-chunk latency to 534ms against its 400ms threshold on
+2-core CI runners and failed the `CI` workflow on every recent main push (the
+v0.5.0 amendment had deferred this exact finding pending corroboration; the
+observed red CI is that corroboration). This release also surfaces the
+per-release progression v0.7-v0.12 in both READMEs, whose roadmap had gone
+quiet at v0.6.
+
+### Fixed
+
+- **The MITM leaf-cert mint no longer blocks the event loop.**
+  `CertAuthority.contextFor()` now mints each leaf asynchronously (`execFile`):
+  keygen + CSR collapse into one openssl process (`req -new -newkey -nodes`)
+  and the CA-sign stays a second, so two async execs replace the three
+  synchronous ones. The CONNECT handler awaits the mint before writing
+  "200 Connection Established" and creating the TLS socket (the handshake
+  needs the cert anyway), concurrent first CONNECTs to the same host share one
+  in-flight mint, a failed mint is retried on the next CONNECT instead of
+  caching the rejection, and a client socket that dies during the mint is
+  detected instead of written to. The tunnel streaming test now measures a
+  warmed connection — the one-time per-host mint is paid untimed — so the
+  strict streaming-vs-buffering assertion no longer depends on RSA keygen
+  speed while still failing if buffering ever regresses.
+
+- **README / README.zh-CN release progression refreshed.** Both READMEs'
+  roadmap narrative stalled at v0.6 while the changelog shipped v0.7-v0.12.
+  The "Limits and next steps" / 限制与后续方向 sections now summarize what
+  each release from v0.7 to v0.12 changed, keeping the marketed copy in
+  lockstep with the changelog (the README half of the v0.11.0
+  version-drift pass that was explicitly deferred to a future documentation
+  pass).
+
+[0.12.0]: https://github.com/SuperMarioYL/idemstep/releases/tag/v0.12.0
+
 ## [0.11.0] - 2026-09-07
 
 Version-surface integrity release. Closes the version-drift the bug-hunter found

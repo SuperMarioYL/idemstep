@@ -118,7 +118,7 @@ The wrapper and proxy are separate integration points. The wrapper does not auto
 - The store is not designed for independently running processes to concurrently share one JSON file.
 - The demo covers local HTTP responses; it does not validate browser integration, payment APIs or HTTPS trust setup.
 
-Implemented: wrapper result reuse, HTTP replay, concurrent-call coalescing, JSON persistence, TTL and optional CONNECT interception. Future directions include stronger recovery semantics and distributed storage. Review CHANGELOG.md and store warnings before depending on restart durability.
+Implemented: wrapper result reuse, HTTP replay, concurrent-call coalescing, JSON persistence, TTL and optional CONNECT interception. Release progression: v0.7 bounded every upstream forward with an idle timeout; v0.8 surfaced mid-session durable-write failures and closed the hosted CONNECT open relay; v0.9 streamed non-transactional responses and stripped Proxy-Authorization upstream; v0.10 caught the non-transactional forward's unhandled rejection and terminated mid-stream clients; v0.11 added the `--version` surface with lockstep version pinning; v0.12 made the MITM leaf-cert mint async so CONNECT tunnels no longer block the event loop. Future directions include stronger recovery semantics and distributed storage. Review CHANGELOG.md and store warnings before depending on restart durability.
 
 ## License and contributions
 
