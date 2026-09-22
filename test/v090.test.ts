@@ -195,6 +195,20 @@ describe("v0.9.0 fix1: non-transactional streaming response is streamed, not buf
   }
 
   it("delivers the first chunk through the CONNECT tunnel immediately (not held until end)", async () => {
+    // Warm the tunnel first: the very first CONNECT to a host pays the one-time
+    // per-host MITM leaf-cert mint (async openssl keygen + CA-sign). That
+    // orthogonal setup cost is not what this test asserts — v0.12.0 made the
+    // mint async (it used to block the event loop and pushed the measured
+    // first-chunk latency past this test's threshold on slow CI runners,
+    // reding main) — so pay it untimed here, then measure the SECOND request,
+    // whose leaf is cached. The streaming-vs-buffering discrimination is
+    // unchanged: if forwardHttps ever regresses to buffering, the timed
+    // request's first chunk is still held until "end" (~800ms) and fails the
+    // 400ms assertion below.
+    const warmup = await tunnelStreamGet(proxy.port, upstreamPort, proxy.caCertPem);
+    expect(warmup.status).toBe(200);
+    expect(warmup.body).toContain("data: first");
+
     const { status, body, firstDataMs } = await tunnelStreamGet(
       proxy.port,
       upstreamPort,

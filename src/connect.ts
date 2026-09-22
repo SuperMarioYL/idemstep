@@ -2,7 +2,7 @@ import http from "node:http";
 import https from "node:https";
 import net from "node:net";
 import tls from "node:tls";
-import { execFileSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { mkdtempSync, readFileSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -80,6 +80,19 @@ export interface ConnectTunnelOptions {
  *
  * Backed by the system `openssl` binary (universally present in dev/CI), so no
  * runtime npm dependency is added — IdemStep stays dependency-light.
+ *
+ * The CA itself is minted synchronously at startup (one-time init cost).
+ * Leaf minting is ASYNC: {@link contextFor} returns a promise and runs its
+ * openssl work via `execFile`, so the Node event loop is never blocked by an
+ * RSA keygen. Pre-fix (v0.11.0 and earlier) `contextFor` ran three
+ * `execFileSync` calls (genrsa + CSR + sign) inline in the CONNECT handler —
+ * blocking the whole event loop for the mint's duration (hundreds of ms on a
+ * slow CI runner, where the first tunnel request's first-chunk latency
+ * breached the streaming test's threshold and red the main-branch CI), and
+ * stalling every other connection the proxy was serving. The mint now
+ * completes before the "200 Connection Established" response is written (the
+ * client's TLS handshake needs the leaf cert anyway) and concurrent first
+ * CONNECTs to the same host share one in-flight mint.
  */
 export class CertAuthority {
   private readonly dir: string;
@@ -88,6 +101,8 @@ export class CertAuthority {
   /** PEM of the CA certificate; trust this in the client to accept the MITM. */
   readonly caCertPem: string;
   private readonly leaves = new Map<string, tls.SecureContext>();
+  /** In-flight mints per host, so concurrent CONNECTs share one mint. */
+  private readonly minting = new Map<string, Promise<tls.SecureContext>>();
 
   constructor() {
     this.dir = mkdtempSync(join(tmpdir(), "idemstep-ca-"));
@@ -102,19 +117,49 @@ export class CertAuthority {
   }
 
   /** A TLS SecureContext presenting a leaf cert valid for `host` (cached). */
-  contextFor(host: string): tls.SecureContext {
+  async contextFor(host: string): Promise<tls.SecureContext> {
     const cached = this.leaves.get(host);
     if (cached) return cached;
+    const inflight = this.minting.get(host);
+    if (inflight) return inflight;
 
+    const minted = this.mintLeaf(host);
+    this.minting.set(host, minted);
+    try {
+      const ctx = await minted;
+      this.leaves.set(host, ctx);
+      return ctx;
+    } finally {
+      // Drop the in-flight entry on success AND failure, so a failed mint
+      // (missing openssl mid-flight, full disk) can be retried on the next
+      // CONNECT instead of caching the rejection forever.
+      this.minting.delete(host);
+    }
+  }
+
+  /** Remove the on-disk key/cert material. */
+  dispose(): void {
+    rmSync(this.dir, { recursive: true, force: true });
+  }
+
+  /**
+   * Mint one leaf certificate for `host`: keygen + CSR in a single openssl
+   * process (`req -new -newkey -nodes`), then one CA-signing process. Two
+   * async execs, no event-loop blocking; the extfile SAN matches the old
+   * three-call chain's output (same leaf shape, one fewer fork).
+   */
+  private async mintLeaf(host: string): Promise<tls.SecureContext> {
     const keyPath = join(this.dir, `${safe(host)}.key`);
     const csrPath = join(this.dir, `${safe(host)}.csr`);
     const certPath = join(this.dir, `${safe(host)}.crt`);
     const extPath = join(this.dir, `${safe(host)}.ext`);
 
-    openssl(["genrsa", "-out", keyPath, "2048"]);
-    openssl(["req", "-new", "-key", keyPath, "-out", csrPath, "-subj", `/CN=${host}`]);
+    await opensslAsync([
+      "req", "-new", "-newkey", "rsa:2048", "-nodes",
+      "-keyout", keyPath, "-out", csrPath, "-subj", `/CN=${host}`,
+    ]);
     writeFileSync(extPath, sanForHost(host), "utf8");
-    openssl([
+    await opensslAsync([
       "x509", "-req", "-in", csrPath,
       "-CA", this.caCertPath, "-CAkey", this.caKeyPath, "-CAcreateserial",
       "-out", certPath, "-days", "825", "-extfile", extPath,
@@ -124,13 +169,7 @@ export class CertAuthority {
       key: readFileSync(keyPath),
       cert: readFileSync(certPath),
     });
-    this.leaves.set(host, ctx);
     return ctx;
-  }
-
-  /** Remove the on-disk key/cert material. */
-  dispose(): void {
-    rmSync(this.dir, { recursive: true, force: true });
   }
 }
 
@@ -144,11 +183,11 @@ export function attachConnectTunnel(
   options: ConnectTunnelOptions,
 ): () => void {
   const log = options.log ?? (() => {});
-  const onConnect = (
+  const onConnect = async (
     req: http.IncomingMessage,
     clientSocket: net.Socket,
     head: Buffer,
-  ): void => {
+  ): Promise<void> => {
     // v0.8.0: when multi-tenant auth is configured, authenticate the CONNECT
     // request ITSELF — not only the inner transactional request. Pre-fix
     // onConnect wrote "200 Connection Established" for any caller, so the
@@ -177,12 +216,34 @@ export function attachConnectTunnel(
     }
 
     clientSocket.on("error", () => clientSocket.destroy());
+
+    // Mint the leaf cert BEFORE answering the CONNECT: the mint is async
+    // (openssl via execFile) so the event loop keeps serving other connections
+    // while it runs, and the client's TLS handshake needs the cert anyway, so
+    // waiting here costs nothing the handshake wouldn't. Pre-fix the mint ran
+    // synchronously right AFTER "200 Connection Established" was written,
+    // blocking the whole event loop — the root cause of the red main-branch CI
+    // (the tunnel streaming test's first chunk arrived 534ms into the request,
+    // past its 400ms threshold, on a 2-core runner).
+    let context: tls.SecureContext;
+    try {
+      context = await options.ca.contextFor(host);
+    } catch (err) {
+      log(`leaf mint failed for ${host}: ${err instanceof Error ? err.message : String(err)}`);
+      if (!clientSocket.destroyed) {
+        clientSocket.end("HTTP/1.1 502 Bad Gateway\r\n\r\n");
+      }
+      return;
+    }
+    // The client may have given up (or the socket died) during the mint.
+    if (clientSocket.destroyed) return;
+
     clientSocket.write("HTTP/1.1 200 Connection Established\r\n\r\n");
 
-    // Terminate TLS locally with a leaf cert for this host (the MITM).
+    // Terminate TLS locally with the minted leaf cert for this host (the MITM).
     const tlsSocket = new tls.TLSSocket(clientSocket, {
       isServer: true,
-      secureContext: options.ca.contextFor(host),
+      secureContext: context,
     });
     if (head.length) tlsSocket.unshift(head);
     tlsSocket.on("error", () => tlsSocket.destroy());
@@ -519,4 +580,16 @@ function safe(host: string): string {
 
 function openssl(args: string[]): void {
   execFileSync("openssl", args, { stdio: ["ignore", "ignore", "ignore"] });
+}
+
+/**
+ * Async openssl invocation for the per-request leaf mint. `execFile` (not
+ * `execFileSync`) so the RSA keygen subprocess never blocks the event loop —
+ * the CONNECT handler awaits this while other connections keep flowing (the
+ * fix for the sync mint that red the main-branch CI; see CertAuthority).
+ */
+function opensslAsync(args: string[]): Promise<void> {
+  return new Promise((resolve, reject) => {
+    execFile("openssl", args, (err: Error | null) => (err ? reject(err) : resolve()));
+  });
 }
