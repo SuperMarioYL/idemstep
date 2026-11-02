@@ -39,7 +39,14 @@ export function generateKey(prefix?: string): IdemKey {
  */
 export function canonicalizeBody(body: RequestShape["body"]): string {
   if (body === undefined || body === null) return "";
-  if (Buffer.isBuffer(body)) return body.toString("utf8");
+  if (Buffer.isBuffer(body)) {
+    // A Buffer carries raw request bytes. Decode and re-run through the string
+    // branch so a JSON buffer is parsed and key-sorted exactly like a JSON
+    // string — the proxy hashes rawBody Buffers on every forward, so this is
+    // the branch requestSignature actually uses. A non-JSON buffer keeps the
+    // raw-text fallback, same as the string branch.
+    return canonicalizeBody(body.toString("utf8"));
+  }
   if (typeof body === "string") {
     // Attempt to canonicalize JSON; fall back to the raw string (e.g. form
     // urlencoded or opaque payloads) when it is not valid JSON.

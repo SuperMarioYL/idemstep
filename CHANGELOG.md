@@ -4,6 +4,53 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.0] - 2026-11-03
+
+Correctness release for the exactly-once core, plus the remaining version-metadata
+gaps. The wrapper's rejection path deleted a key's record unconditionally, so on
+the documented shared-store path (wrapper and proxy on one `IdemStore`) a throw
+after the proxy had already committed the network side effect erased the dedup
+entry and the next retry forwarded again — a double submit. `canonicalizeBody`
+also promised JSON-key-order independence but returned `Buffer` bodies verbatim,
+and Buffers are exactly what the proxy hashes. `package-lock.json` still carried
+the previous release's version, which the lockstep guard never checked, and the
+CLI help still promised team/billing support in a release that shipped seven
+minors earlier.
+
+### Fixed
+
+- **A committed key survives a post-commit `fn` rejection.** `idemStep`'s catch
+  block called `store.delete(key)` with no status check. That was written for the
+  v0.4.0 poison-pending fix, where the record is always `pending` — but on the
+  shared-store path the proxy commits the key as soon as the upstream response
+  lands, i.e. while `fn` is still running. A later throw (post-response
+  validation, a body-parse failure) therefore deleted a **committed** record, and
+  the next same-key retry forwarded a second time. The catch now releases only a
+  still-`pending` record (preserving the no-poison-pending guarantee) and, for a
+  committed record, drops just the stale in-flight handle.
+
+- **`canonicalizeBody` canonicalizes `Buffer` bodies.** The Buffer branch
+  returned `body.toString("utf8")`, bypassing the JSON parse and key-sorting the
+  string and object branches apply, so `requestSignature` was byte-order
+  sensitive for the raw-body Buffers the proxy hashes on every forward. Buffer
+  input now runs through the same string branch; non-JSON buffers keep the raw
+  text fallback. The old test passed only because its single-key fixture has no
+  reorderable keys.
+
+- **`package-lock.json` is part of the version lockstep.** The shipped v0.12.0
+  tag's lockfile declared `0.11.0` in both its root `version` and
+  `packages[""].version` while `package.json` said `0.12.0`; the v0.11.0 guard
+  compared every surface except the lockfile. Both fields are aligned and
+  `test/version.test.ts` now asserts them against the single version constant,
+  so the next bump cannot miss them.
+
+- **The CLI help no longer promises a past release.** `idemstep --help` still
+  described team plans, billing and local-library multi-user as "remain future
+  v0.6.0+". It now states the same scope without a version promise; behaviour is
+  unchanged.
+
+[0.13.0]: https://github.com/SuperMarioYL/idemstep/releases/tag/v0.13.0
+
 ## [0.12.0] - 2026-09-23
 
 Reliability release that closes the red main-branch CI. The MITM leaf-cert

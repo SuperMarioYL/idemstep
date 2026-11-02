@@ -36,6 +36,11 @@ function readSiteContentVersion(): string {
   return site.content_version as string;
 }
 
+function readLockVersions(): { root: string; pkg: string } {
+  const lock = JSON.parse(readFileSync(join(REPO_ROOT, "package-lock.json"), "utf8"));
+  return { root: lock.version, pkg: lock.packages?.[""]?.version };
+}
+
 function readChangelogHeadVersion(): string {
   const md = readFileSync(join(REPO_ROOT, "CHANGELOG.md"), "utf8");
   const m = md.match(/^## \[([0-9]+\.[0-9]+\.[0-9]+)\]/m);
@@ -77,5 +82,16 @@ describe("v0.11.0: version surfaces are in lockstep", () => {
 
   it("CHANGELOG head version == VERSION", () => {
     expect(readChangelogHeadVersion()).toBe(VERSION);
+  });
+
+  it("package-lock.json version == VERSION (root + packages[''])", () => {
+    // v0.13.0 fix-package-lock-version-drift: the shipped v0.12.0 tag's lockfile
+    // still declared 0.11.0 in both places, and this guard never opened it — so
+    // the drift shipped silently, exactly like the CHANGELOG/site drift the
+    // guard was built to stop. `npm install --package-lock-only` rewrites these
+    // two fields; nothing else in the file carries the package version.
+    const lock = readLockVersions();
+    expect(lock.root).toBe(VERSION);
+    expect(lock.pkg).toBe(VERSION);
   });
 });

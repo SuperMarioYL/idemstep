@@ -5,9 +5,10 @@
  *   - `package.json` `"version"`
  *   - the `idemstep --version` / `-v` CLI output
  *   - `web/site.json` `"content_version"`
+ *   - `package-lock.json` `"version"` (root + `packages[""]`)
  *   - the `## [<version>]` head entry of `CHANGELOG.md`
  *
- * `test/version.test.ts` asserts all five are equal, so a bump that misses a
+ * `test/version.test.ts` asserts all six are equal, so a bump that misses a
  * surface fails the suite instead of shipping silently drifted. This guard
  * exists because the shipped v0.10.0 tag had no CLI version surface at all
  * (`--version` fell through to the USAGE banner), a `web/site.json`
@@ -17,4 +18,4 @@
  *
  * Bump this constant together with `package.json` when cutting a release.
  */
-export const VERSION = "0.12.0";
+export const VERSION = "0.13.0";

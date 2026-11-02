@@ -109,7 +109,7 @@ Commands:
           is namespaced by a hash of the operator's API key so tenants never
           collide). Without --api-keys it is single-tenant (no auth).
           Scoped to single-operator API-key auth + routing only; team plans,
-          billing, and local-library multi-user remain future v0.6.0+.
+          billing, and local-library multi-user remain out of scope.
 
 Options:
   -p, --port N      Port to listen on (default: 8473)
@@ -325,7 +325,7 @@ async function main(): Promise<void> {
     // Playwright context gets managed exactly-once without operating the proxy
     // itself. With --api-keys it is multi-tenant (per-operator API-key auth +
     // per-key IdemStore namespacing); without, single-tenant. Team plans,
-    // billing, and local-library multi-user remain out of scope (v0.6.0+).
+    // billing, and local-library multi-user remain out of scope (future work).
     const host = args.host ?? "0.0.0.0";
     const storePath = args.store ?? "idemstep-hosted.json";
     // v0.8.0: surface durable-store errors on first occurrence DURING

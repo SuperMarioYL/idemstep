@@ -82,10 +82,21 @@ export async function idemStep<T>(
       store.setResult(key, result);
       return result;
     } catch (err) {
-      // Release the pending record before rethrowing — mirrors the proxy's
-      // upstream-error release (proxy.ts). clearInflight alone left the record
-      // behind as an un-expirable poison-pending key.
-      store.delete(key);
+      // Release the record before rethrowing — but only while it is still
+      // `pending`, mirroring the proxy's upstream-error release (proxy.ts).
+      // TTL/prune never sweep a pending record, so an abandoned failed key
+      // would otherwise leak for the whole session (begin() persisted it too).
+      //
+      // A COMMITTED record must survive. On the shared-store path the proxy
+      // commits the key as soon as the upstream response lands, which is while
+      // `fn` is still running; a throw *after* that network commit (a
+      // post-response validation error, a body-parse failure) must not erase
+      // the proof that the side effect already happened, or a same-key retry
+      // would forward again — a double submit. Drop only the now-stale
+      // in-flight handle and rethrow.
+      const record = store.get(key);
+      if (record && record.status !== "committed") store.delete(key);
+      else store.clearInflight(key);
       throw err;
     }
   })();
